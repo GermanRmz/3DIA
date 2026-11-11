@@ -1,0 +1,8 @@
+# Instala PyTorch primero (ver README), luego: pip install -r requirements.txt
+hy3dgen @ git+https://github.com/Tencent-Hunyuan/Hunyuan3D-2
+# Con versiones más nuevas de estas dos librerías el modelo no carga
+transformers<5
+diffusers==0.35.2
+huggingface_hub<1
+opencv-python
+gradio

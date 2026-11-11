@@ -1,0 +1,6 @@
+venv/
+__pycache__/
+*.glb
+*.obj
+*.stl
+gradio_cached_examples/
