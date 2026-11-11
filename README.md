@@ -1,4 +1,4 @@
-# Imagen a 3D
+# 3DIA: imagen a 3D
 
 Convierte una imagen (por ejemplo, la foto de una figura) en un modelo 3D `.glb`
 usando el modelo abierto [Hunyuan3D-2](https://github.com/Tencent-Hunyuan/Hunyuan3D-2).
@@ -20,8 +20,8 @@ Por ahora genera solo la **forma** (sin color/textura).
 ## Instalación
 
 ```bash
-git clone <URL-de-este-repo>
-cd imagen-a-3d
+git clone https://github.com/GermanRmz/3DIA
+cd 3DIA
 python -m venv venv
 ```
 
