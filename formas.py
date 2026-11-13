@@ -31,7 +31,9 @@ VOLUMEN_MAXIMO = 0.35    # un apéndice no puede llevarse más de esto (protege 
 LARGO_MINIMO = 0.06      # fracción del tamaño en esa dirección
 ALARGAMIENTO = 1.0       # largo mínimo / ancho del corte
 CORTE_MAXIMO = 0.3      # área del corte / sección más ancha de la figura
-SOLIDEZ_MINIMA = 0.5     # área de las secciones / área de su envolvente convexa
+SOLIDEZ_MINIMA = 0.5
+MIRAR_ADELANTE = 8       # niveles que se miran tras una fusión
+CRECIMIENTO = 2.5        # si la sección fusionada crece esto, lo que llega son apéndices     # área de las secciones / área de su envolvente convexa
 
 
 @dataclass
@@ -50,54 +52,68 @@ class DivisionForma:
 
 
 def _cadenas(m_marco, z0, z1):
-    """Sigue los trozos de sección de abajo arriba. Devuelve apéndices candidatos
-    (sin filtrar) en el marco dado."""
+    """Sigue los trozos de sección de abajo arriba. Devuelve las cadenas terminadas
+    (candidatas a apéndice, sin filtrar), el paso entre niveles y la mayor sección.
+
+    Dos pasadas: primero se registran todas las secciones y cómo se solapan entre
+    niveles; luego, en cada fusión, se mira unos niveles más allá: si la sección
+    fusionada crece mucho (una pata que entra en el cuerpo) las que llegan son
+    apéndices; si apenas crece (un trozo de ropa que se pega a la pierna), la
+    mayor sigue y solo terminan las demás."""
     zs = np.linspace(z0, z1, NIVELES + 2)[1:-1]
     paso = zs[1] - zs[0]
-    activas = []          # cadenas: dict(niveles, secciones, areas)
-    terminadas = []
-    area_maxima = 0.0
+    niveles = []          # por nivel: (z, trozos, solapes con el anterior, sucesor de cada previo)
+    previos = []
     for z in zs:
         trozos = [c for c in m_marco.slice(float(z)).decompose() if c.area() > 1e-6]
-        area_maxima = max(area_maxima, sum(t.area() for t in trozos))
-        nuevas = []
-        usadas = set()
-        solapes = [[i for i, c in enumerate(activas) if (c["secciones"][-1] ^ t).area() > 1e-6]
-                   for t in trozos]
-        # Si un trozo se divide, la cadena sigue por el mayor de sus sucesores.
+        solapes = [[i for i, p in enumerate(previos) if (p ^ t).area() > 1e-6] for t in trozos]
         sucesor = {}
-        for j, previas in enumerate(solapes):
-            for i in previas:
+        for j, ps in enumerate(solapes):
+            for i in ps:
                 if i not in sucesor or trozos[j].area() > trozos[sucesor[i]].area():
                     sucesor[i] = j
+        niveles.append((float(z), trozos, solapes, sucesor))
+        previos = trozos
+    area_maxima = max((sum(t.area() for t in n[1]) for n in niveles), default=0.0)
+
+    def crecimiento(k, j):
+        """Mayor área siguiendo al sucesor principal desde (nivel k, trozo j)."""
+        mayor = niveles[k][1][j].area()
+        for kk in range(k + 1, min(k + 1 + MIRAR_ADELANTE, len(niveles))):
+            j = niveles[kk][3].get(j)
+            if j is None:
+                break
+            mayor = max(mayor, niveles[kk][1][j].area())
+        return mayor
+
+    activas = []
+    terminadas = []
+    for k, (z, trozos, solapes, sucesor) in enumerate(niveles):
+        nuevas = []
+        usadas = set()
         for j, t in enumerate(trozos):
             previas = solapes[j]
             if len(previas) == 1 and sucesor.get(previas[0]) != j:
                 previas = []          # rama secundaria de una división: cadena nueva
+            previas = [i for i in previas if i not in usadas]
             if len(previas) >= 2:
-                # Fusión: los trozos claramente más pequeños que la sección fusionada
-                # son apéndices que terminan aquí (dos piernas que se unen en la
-                # cadera, una pata que se une al cuerpo). Si el mayor domina la
-                # sección fusionada, es el tronco y sigue.
-                previas = [i for i in previas if i not in usadas]
-                area = t.area()
                 tronco = max(previas, key=lambda i: activas[i]["areas"][-1])
-                sigue = activas[tronco]["areas"][-1] > 0.6 * area
+                crece = crecimiento(k, j) >= CRECIMIENTO * activas[tronco]["areas"][-1]
                 for i in previas:
                     usadas.add(i)
-                    if sigue and i == tronco:
-                        continue
-                    if activas[i]["areas"][-1] <= 0.6 * area:
-                        terminadas.append((activas[i], float(z), "fusion"))
-                if sigue:
+                    if crece or i != tronco:
+                        terminadas.append((activas[i], z, "fusion"))
+                if crece:
+                    nuevas.append({"niveles": [z], "secciones": [t], "areas": [t.area()],
+                                   "hijos": [id(activas[i]) for i in previas]})
+                else:
                     c = activas[tronco]
                     c["niveles"].append(z)
                     c["secciones"].append(t)
                     c["areas"].append(t.area())
+                    c["hijos"] += [id(activas[i]) for i in previas if i != tronco]
                     nuevas.append(c)
-                else:
-                    nuevas.append({"niveles": [z], "secciones": [t], "areas": [t.area()]})
-            elif len(previas) == 1 and previas[0] not in usadas:
+            elif len(previas) == 1:
                 c = activas[previas[0]]
                 usadas.add(previas[0])
                 c["niveles"].append(z)
@@ -105,7 +121,7 @@ def _cadenas(m_marco, z0, z1):
                 c["areas"].append(t.area())
                 nuevas.append(c)
             else:
-                nuevas.append({"niveles": [z], "secciones": [t], "areas": [t.area()]})
+                nuevas.append({"niveles": [z], "secciones": [t], "areas": [t.area()], "hijos": []})
         activas = nuevas
     terminadas += [(c, None, "fin") for c in activas]
     return terminadas, paso, area_maxima
@@ -137,8 +153,14 @@ def detectar(malla: trimesh.Trimesh) -> list[Apendice]:
         z0, z1 = b[2], b[5]
         tam = z1 - z0
         cadenas, paso, area_maxima = _cadenas(mm, z0, z1)
+        aceptadas = set()
         for c, z_fusion, motivo in cadenas:
             areas = c["areas"]
+            # Si de esta cadena ya salen apéndices (p. ej. dos patas que se unen en el
+            # pecho), se prefieren esas piezas a cortar el grupo.
+            if any(h in aceptadas for h in c.get("hijos", [])):
+                aceptadas.add(id(c))
+                continue
             cortes = []
             if motivo == "fusion":
                 n = max(1, len(areas) - 1)               # un nivel antes de la fusión
@@ -169,6 +191,8 @@ def detectar(malla: trimesh.Trimesh) -> list[Apendice]:
                     continue
                 candidatos.append(Apendice(nombre, float(c["niveles"][0] - paso),
                                            float(c["niveles"][n - 1]), c["secciones"][:n], vol))
+                aceptadas.add(id(c))
+                break
     return sorted(candidatos, key=lambda a: -a.volumen)
 
 
@@ -208,8 +232,11 @@ def dividir(malla: trimesh.Trimesh, max_partes: int = 8,
         for t in trozos[1:]:                       # lo que no es del apéndice vuelve
             if t.volume() > 1.0:
                 resto = resto + t
+        avisos = []
         pieza, resto = _unir(pieza, resto, np.eye(4)[:3], np.eye(4)[:3], a.corte, -1, union,
-                             res.avisos, a.direccion)
+                             avisos, a.direccion)
+        if avisos and union.tipo != "ninguna":
+            continue          # sin sitio para la unión: mejor no separar esta pieza
         cuentas[a.direccion] = cuentas.get(a.direccion, 0) + 1
         piezas.append((f"pieza {a.direccion} {cuentas[a.direccion]}", pieza.transform(vuelta)))
         cuerpo = resto.transform(vuelta)
