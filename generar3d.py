@@ -300,6 +300,9 @@ def generar(imagen: Image.Image, salida: str, pasos: int = 5, resolucion: int = 
         for aviso in avisos:
             print(aviso)
         impresion.export(ruta_impresion(salida))
+        # Para poder pasar después el color de la textura a las partes (dividir.py).
+        np.savetxt(os.path.splitext(ruta_impresion(salida))[0] + ".txt",
+                   impresion.metadata["transformacion"])
         print(f"Impresión: {ruta_impresion(salida)} ({acabado}, {impresion.extents.round(1)} mm, "
               f"{len(impresion.faces)} caras, {time.time() - t:.1f} s)")
 

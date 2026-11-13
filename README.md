@@ -16,6 +16,7 @@ Incluye:
 - `multicolor.py`: 3MF pintado por filamentos para impresoras multicolor.
 - `dividir.py`: divide un modelo ya generado en partes (personaje o cortes planos).
 - `personaje.py`: detecta cuello, hombros y entrepierna y separa cabeza, torso, brazos y piernas.
+- `formas.py`: división automática de cualquier forma (patas, cola, cuello...).
 - `segmentar.py`: cortes planos y uniones (espigas, pasadores, imanes).
 
 ## Requisitos
@@ -132,8 +133,20 @@ están pegados, se quedan en el torso y se avisa.
 | `bola` | rótula: bola con cuello en la pieza y alojamiento a presión en el torso (figura articulada) |
 | `ninguna` | corte plano para pegar |
 
+**Automático (cualquier forma)** (`--plantilla auto`): para animales, objetos o
+lo que no sea humanoide. Recorre la figura por secciones desde las 6 direcciones y
+separa lo que sobresale del cuerpo y se une a él por una zona estrecha (patas,
+cola, cuello y cabeza, asas...). Solo acepta apéndices alargados, macizos y de
+corte fino respecto al cuerpo, para no cortar barrigas, mantas o mechones.
+`--max-partes` limita el número de piezas.
+
 **Cortes planos**: `--cortes "z=40, x=0"` (mm) con uniones `espiga`, `pasadores`,
 `imanes` o `ninguna`.
+
+Uniones para personaje y automático: `espiga`, `bola`, `imanes` o `ninguna`.
+
+Al dividir un `<modelo>_impresion.stl` de esta app se conserva el acabado y, con
+`--colores`, se recupera el color de su `.glb`.
 
 ```bash
 python dividir.py figura.glb --plantilla 6 --union bola --altura-mm 150 --colores 4
@@ -141,6 +154,10 @@ python dividir.py figura.glb --plantilla 6 --union bola --altura-mm 150 --colore
 
 ```bash
 python dividir.py figura_impresion.stl --cortes "z=60" --union imanes
+```
+
+```bash
+python dividir.py caballo.glb --plantilla auto --union espiga --altura-mm 150
 ```
 
 Salen `<modelo>_partes.zip` (un STL por pieza con su nombre), `<modelo>_partes.3mf`

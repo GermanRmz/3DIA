@@ -37,14 +37,15 @@ BRAZO_MINIMO = 0.035  # fracción mínima del volumen total para aceptar un braz
 ANGULO_HOMBRO = 20  # grados respecto a la vertical del corte del hombro
 
 UNIONES = {"espiga": "Espiga (pin y agujero)", "bola": "Rótula de bola (articulada)",
-           "ninguna": "Sin unión (pegar)"}
+           "imanes": "Imanes", "ninguna": "Sin unión (pegar)"}
 
 
 @dataclass
 class OpcionesUnion:
     tipo: str = "espiga"
-    diametro: float = 0.0      # 0 = automático según el tamaño del corte
+    diametro: float = 0.0      # 0 = automático según el tamaño del corte (imanes: 6 mm)
     holgura: float = 0.2       # juego en mm (la rótula encaja a presión con un poco menos)
+    iman_alto: float = 3.0     # alto de los imanes (mm)
 
 
 @dataclass
@@ -388,7 +389,15 @@ def _unir(hija, padre, ida, vuelta, pos, signo, u: OpcionesUnion, avisos, nombre
     def esfera(z, radio):
         return m3d.Manifold.sphere(radio, 48).translate((x, y, z))
 
-    if u.tipo == "espiga":
+    if u.tipo == "imanes":
+        r = (u.diametro or 6.0) / 2 + u.holgura
+        if r > 0.8 * radio_max:
+            avisos.append(f"{nombre}: no cabe un imán de {2 * r - 2 * u.holgura:.0f} mm; queda sin unión.")
+            return hija, padre
+        alto = u.iman_alto + 0.2
+        h = h - cilindro(pos - s * alto, pos + s * 0.01, r)
+        pa = pa - cilindro(pos - s * 0.01, pos + s * alto, r)
+    elif u.tipo == "espiga":
         largo = max(2.5 * r, 4.0)
         h = h + cilindro(pos - s * 1.0, pos + s * largo, r)
         pa = pa - cilindro(pos - s * 0.01, pos + s * (largo + 0.4), r + u.holgura)

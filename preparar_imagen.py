@@ -124,3 +124,9 @@ def preparar(imagen: Image.Image, fondo: str = "auto",
         notas.append(f"Aviso: el objeto mide solo ~{lado_objeto} px; con una imagen de más "
                      "resolución saldrán más detalles.")
     return Image.fromarray(resultado, "RGBA"), notas
+
+
+def liberar():
+    """Descarga el modelo de quitar fondos (se recarga al volver a usarlo)."""
+    global _sesion_ia
+    _sesion_ia = None

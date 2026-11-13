@@ -173,3 +173,13 @@ def texturizar(malla, imagen, max_caras: int = 40000, resolucion_textura: int = 
         resultado = pintor(malla.copy(), image=imagen)
     torch.cuda.empty_cache()
     return resultado
+
+
+def liberar():
+    """Descarga los modelos de pintura de la memoria (se recargan al volver a pintar)."""
+    global _pintor, _config_pintor
+    _pintor, _config_pintor = None, None
+    import gc
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
