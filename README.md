@@ -12,6 +12,7 @@ Incluye:
 - `rasterizador.py`: rasterizador en PyTorch (sustituye al módulo CUDA compilado).
 - `modelos.py`: descarga de pesos con reintentos.
 - `preparar_imagen.py`: analiza la imagen y quita el fondo antes de generar.
+- `acabados.py`: relieves de superficie para impresión 3D (tejido, moleteado...).
 
 ## Requisitos
 
@@ -69,6 +70,32 @@ Opciones útiles:
 - `--resolucion-textura 1024`: textura más rápida y con menos VRAM.
 - `--max-caras 20000`: menos caras al pintar, más rápido.
 - `--vram-baja`: fuerza a mover modelos a la CPU si te quedas sin memoria.
+
+## Impresión 3D y acabados
+
+Con `--acabado` (o la sección "Impresión 3D" de la app) se genera además
+`<salida>_impresion.stl`: en milímetros, con Z hacia arriba, apoyado en la cama y
+cerrado (estanco), listo para el laminador. El acabado es **relieve real** en la
+geometría, no color:
+
+| Acabado | Aspecto | Patrón / profundidad por defecto |
+|---|---|---|
+| `tejido` | punto de lana (columnas de V) | 2.5 mm / 0.5 mm |
+| `moleteado` | diamantes en relieve | 2 mm / 0.4 mm |
+| `estrias` | estrías verticales | 2 mm / 0.4 mm |
+| `anillos` | anillos horizontales | 1.5 mm / 0.3 mm |
+| `martillado` | metal martillado | 3 mm / 0.4 mm |
+| `piedra` | celdas tipo piedra o escamas | 4 mm / 0.4 mm |
+| `madera` | vetas de madera | 2 mm / 0.3 mm |
+| `ninguno` | liso | — |
+
+```bash
+python generar3d.py gato.jpg -o gato.glb --acabado tejido --altura-mm 60
+```
+
+Ajusta con `--escala-acabado` y `--profundidad-acabado` (mm). Para que el relieve
+se note, el patrón debe ser varias veces mayor que el diámetro de la boquilla
+(con 0.4 mm, patrones de 2 mm o más) y la profundidad de al menos 0.3 mm.
 
 ## Velocidad
 

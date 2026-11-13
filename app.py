@@ -9,12 +9,14 @@ import time
 
 import gradio as gr
 
-from generar3d import generar
+import acabados
+from generar3d import generar, ruta_impresion
 from preparar_imagen import preparar
 
 
 def convertir(imagen, fondo, ajustar, pasos, resolucion, semilla, con_textura, resolucion_textura,
-              max_caras, progreso=gr.Progress(track_tqdm=True)):
+              max_caras, con_stl, acabado, altura_mm, escala, profundidad,
+              progreso=gr.Progress(track_tqdm=True)):
     """Genera paso a paso y va mostrando el avance en la página."""
     if imagen is None:
         raise gr.Error("Sube una imagen primero.")
@@ -25,21 +27,37 @@ def convertir(imagen, fondo, ajustar, pasos, resolucion, semilla, con_textura, r
         preparada, notas = preparar(imagen, FONDOS[fondo], ajustar)
         estado = "\n".join(f"- {n}" for n in notas)
         pasos_txt = "forma y textura (unos minutos)" if con_textura else "forma"
-        yield preparada, None, None, estado + f"\n\n**Generando {pasos_txt}...**"
+        yield preparada, None, None, None, None, estado + f"\n\n**Generando {pasos_txt}...**"
 
         generar(preparada, salida, int(pasos), int(resolucion), int(semilla),
                 textura=con_textura, fondo="mantener", ajustar=False,
+                acabado=ACABADOS_UI[acabado] if con_stl else None, altura_mm=float(altura_mm),
+                escala_acabado=float(escala), profundidad_acabado=float(profundidad),
                 resolucion_textura=int(resolucion_textura), max_caras=int(max_caras))
     except RuntimeError as e:
         raise gr.Error(str(e))
-    yield preparada, salida, salida, estado + f"\n\n**Listo en {time.time() - inicio:.0f} s.**"
+    stl = ruta_impresion(salida) if con_stl else None
+    yield (preparada, salida, salida, stl, stl,
+           estado + f"\n\n**Listo en {time.time() - inicio:.0f} s.**")
 
+
+def valores_acabado(nombre):
+    """Escala y profundidad recomendadas al cambiar de acabado."""
+    clave = ACABADOS_UI[nombre]
+    if clave == "ninguno":
+        return gr.update(interactive=False), gr.update(interactive=False)
+    _, escala, profundidad, _ = acabados.ACABADOS[clave]
+    return gr.update(value=escala, interactive=True), gr.update(value=profundidad, interactive=True)
+
+
+ACABADOS_UI = {"Sin acabado (liso)": "ninguno",
+               **{f"{k.capitalize()}: {v[3].lower()}": k for k, v in acabados.ACABADOS.items()}}
 
 FONDOS = {"Automático": "auto", "IA": "ia", "Fondo blanco (sin IA)": "blanco",
           "No tocar": "mantener"}
 
 with gr.Blocks(title="Imagen a 3D") as demo:
-    gr.Markdown("# Imagen a 3D\nSube una foto de un objeto y genera su modelo 3D con color. "
+    gr.Markdown("# Imagen a 3D\nSube una foto de un objeto y genera su modelo 3D con color y un STL listo para imprimir. "
                 "Funciona con [Hunyuan3D-2](https://github.com/Tencent-Hunyuan/Hunyuan3D-2).")
     with gr.Row():
         with gr.Column():
@@ -47,6 +65,14 @@ with gr.Blocks(title="Imagen a 3D") as demo:
             fondo = gr.Radio(list(FONDOS), value="Automático", label="Quitar el fondo")
             ajustar = gr.Checkbox(value=True, label="Ajustar imagen (recortar, centrar, limpiar)")
             con_textura = gr.Checkbox(value=True, label="Pintar textura (color)")
+            with gr.Accordion("Impresión 3D (.stl)", open=True):
+                con_stl = gr.Checkbox(value=True, label="Generar STL para imprimir")
+                acabado = gr.Dropdown(list(ACABADOS_UI), value="Sin acabado (liso)",
+                                      label="Acabado de la superficie (relieve real)")
+                altura_mm = gr.Slider(20, 250, value=60, step=5, label="Altura de la pieza (mm)")
+                with gr.Row():
+                    escala = gr.Number(value=2.5, label="Tamaño del patrón (mm)", interactive=False)
+                    profundidad = gr.Number(value=0.5, label="Profundidad (mm)", interactive=False)
             boton = gr.Button("Generar 3D", variant="primary")
             with gr.Accordion("Opciones de forma", open=False):
                 pasos = gr.Slider(1, 30, value=5, step=1, label="Pasos")
@@ -60,12 +86,15 @@ with gr.Blocks(title="Imagen a 3D") as demo:
             estado = gr.Markdown()
             preparada = gr.Image(label="Imagen preparada (lo que recibe el modelo)", height=256)
             visor = gr.Model3D(label="Modelo 3D")
-            archivo = gr.File(label="Descargar .glb")
+            archivo = gr.File(label="Descargar .glb (con color)")
+            visor_stl = gr.Model3D(label="Modelo para imprimir (mm, con acabado)")
+            archivo_stl = gr.File(label="Descargar .stl")
     boton.click(convertir,
                 [entrada, fondo, ajustar, pasos, resolucion, semilla, con_textura, resolucion_textura,
-                 max_caras],
-                [preparada, visor, archivo, estado],
+                 max_caras, con_stl, acabado, altura_mm, escala, profundidad],
+                [preparada, visor, archivo, visor_stl, archivo_stl, estado],
                 show_progress_on=[visor])
+    acabado.change(valores_acabado, acabado, [escala, profundidad])
 
 if __name__ == "__main__":
     demo.queue().launch()

@@ -130,10 +130,19 @@ def generar_forma(imagen: Image.Image, pasos: int = 5, resolucion: int = 256,
     return malla
 
 
+def ruta_impresion(salida: str) -> str:
+    return os.path.splitext(salida)[0] + "_impresion.stl"
+
+
 def generar(imagen: Image.Image, salida: str, pasos: int = 5, resolucion: int = 256,
             semilla: int = 0, dispositivo: str = "auto", textura: bool = True,
-            fondo: str = "auto", ajustar: bool = True, **opciones_textura) -> str:
+            fondo: str = "auto", ajustar: bool = True, acabado: str | None = None,
+            altura_mm: float = 60, escala_acabado: float | None = None,
+            profundidad_acabado: float | None = None, **opciones_textura) -> str:
     """Genera el modelo 3D de `imagen` y lo guarda en `salida` (.glb, .obj, .stl).
+
+    Con `acabado` (un nombre de acabados.ACABADOS o "ninguno") también guarda
+    *_impresion.stl: en mm, Z arriba, apoyado en la cama y con el relieve elegido.
 
     Con `textura=True` también lo pinta (necesita GPU); `opciones_textura` se
     pasan a `textura.texturizar` (max_caras, resolucion_textura...).
@@ -151,15 +160,28 @@ def generar(imagen: Image.Image, salida: str, pasos: int = 5, resolucion: int = 
     malla = generar_forma(imagen, pasos, resolucion, semilla, dispositivo)
     print(f"Forma: {time.time() - t:.1f} s ({len(malla.faces)} caras)")
 
+    from textura import preparar_malla
+    malla = preparar_malla(malla)  # quita trozos sueltos y caras degeneradas
+
+    if acabado is not None:
+        import acabados
+
+        t = time.time()
+        avisos = []
+        impresion = acabados.aplicar(malla, acabado, altura_mm, escala_acabado,
+                                     profundidad_acabado, avisos)
+        for aviso in avisos:
+            print(aviso)
+        impresion.export(ruta_impresion(salida))
+        print(f"Impresión: {ruta_impresion(salida)} ({acabado}, {impresion.extents.round(1)} mm, "
+              f"{len(impresion.faces)} caras, {time.time() - t:.1f} s)")
+
     t = time.time()
     if textura:
         from textura import texturizar
         liberar_gpu_forma()
         malla = texturizar(malla, imagen, **opciones_textura)
         print(f"Textura: {time.time() - t:.1f} s")
-    else:
-        from textura import preparar_malla
-        malla = preparar_malla(malla)
     malla.export(salida)
     return salida
 
@@ -187,12 +209,21 @@ def main():
                    help="La malla se reduce a estas caras antes de pintarla")
     t.add_argument("--vram-baja", action="store_true", default=None,
                    help="Mueve los modelos a CPU cuando no se usan (auto si la GPU tiene <16 GB)")
+    import acabados
+    i = p.add_argument_group("impresión 3D (genera <salida>_impresion.stl)")
+    i.add_argument("--acabado", choices=["ninguno"] + list(acabados.ACABADOS),
+                   help="Relieve de la superficie: " + ", ".join(
+                       f"{k} ({v[3].lower()})" for k, v in acabados.ACABADOS.items()))
+    i.add_argument("--altura-mm", type=float, default=60, help="Altura de la pieza impresa (mm)")
+    i.add_argument("--escala-acabado", type=float, help="Tamaño del patrón en mm")
+    i.add_argument("--profundidad-acabado", type=float, help="Profundidad del relieve en mm")
     args = p.parse_args()
 
     inicio = time.time()
     generar(Image.open(args.imagen), args.salida, args.pasos, args.resolucion,
             args.semilla, args.dispositivo, textura=not args.sin_textura, fondo=args.fondo,
-            ajustar=not args.sin_ajustar,
+            ajustar=not args.sin_ajustar, acabado=args.acabado, altura_mm=args.altura_mm,
+            escala_acabado=args.escala_acabado, profundidad_acabado=args.profundidad_acabado,
             max_caras=args.max_caras, resolucion_textura=args.resolucion_textura,
             vram_baja=args.vram_baja)
     print(f"Listo: {args.salida} ({time.time() - inicio:.0f} s)")
