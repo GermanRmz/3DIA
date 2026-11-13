@@ -108,15 +108,20 @@ def detectar(malla: trimesh.Trimesh) -> Puntos:
         elif p.entrepierna is not None:
             break
 
-    # Cuello: mínimo de área entre la mitad y el 95 % de la altura, con más
-    # área por encima (la cabeza) que en el propio cuello.
+    # Cuello: la parte alta de la zona estrecha que hay justo debajo de la cabeza.
+    # Se busca el mínimo de área entre el cuerpo y la altura de máxima área de la
+    # cabeza, y se sube mientras el área siga siendo casi tan pequeña (en un chibi
+    # la cabeza se apoya directamente en el cuerpo, sin un cuello más estrecho).
     base = (p.entrepierna or z0 + 0.3 * alto)
-    ventana = (zs > max(base, z0 + 0.45 * alto)) & (zs < z0 + 0.95 * alto)
+    arriba = zs > z0 + 0.4 * alto
+    z_cabeza = zs[arriba][np.argmax(suave[arriba])] if arriba.any() else z1
+    ventana = (zs > max(base + 0.05 * alto, z0 + 0.25 * alto)) & (zs < z_cabeza)
     if ventana.any():
         idx = np.nonzero(ventana)[0]
-        i = idx[np.argmin(suave[idx])]
-        if suave[i:].max() > 1.5 * suave[i] and suave[:i + 1][zs[:i + 1] > base].max(initial=0) > 1.2 * suave[i]:
-            p.cuello = float(zs[i])
+        minimo = suave[idx].min()
+        if suave[zs >= z_cabeza].max() > 2 * minimo:
+            estrechos = idx[suave[idx] <= 1.15 * minimo]
+            p.cuello = float(zs[estrechos.max()])
 
     # Hombros: subiendo desde la entrepierna, el primer tramo continuo de alturas
     # con un brazo suelto a cada lado del torso; su parte más alta es la axila.
@@ -157,17 +162,30 @@ def detectar(malla: trimesh.Trimesh) -> Puntos:
 # --- Separación -------------------------------------------------------------------
 
 def _region(cuerpo, zona, elegir):
-    """Separa del cuerpo los trozos de cuerpo∩zona que `elegir` acepte. El resto
-    se obtiene restando lo elegido (así no se cortan ni se vuelven a pegar los
-    trozos que no se separan)."""
-    import manifold3d as m3d
+    """Separa del cuerpo los trozos de cuerpo∩zona que `elegir` acepte.
 
+    Pieza y resto se cortan con el mismo cortador (la zona limitada a la caja de
+    los trozos elegidos), así ambos lados comparten solo caras planas de corte y
+    no quedan pieles finas de superficie pegadas a ninguno de los dos."""
     trozos = sorted((cuerpo ^ zona).decompose(), key=lambda t: -t.volume())
     elegidos = elegir(trozos)
     if not elegidos:
         return cuerpo, None
-    pieza = m3d.Manifold.batch_boolean(elegidos, m3d.OpType.Add)
-    return cuerpo - pieza, pieza
+    import manifold3d as m3d
+
+    cajas = []
+    for t in elegidos:   # una caja por trozo (no abarca las manos entre dos piernas)
+        b = np.asarray(t.bounding_box())
+        x0, y0, z0 = b[:3] - 0.5
+        x1, y1, z1 = b[3:] + 0.5
+        cajas.append(m3d.Manifold.cube((x1 - x0, y1 - y0, z1 - z0)).translate((x0, y0, z0)))
+    cortador = zona ^ m3d.Manifold.batch_boolean(cajas, m3d.OpType.Add)
+    pieza = cuerpo ^ cortador
+    partes = pieza.decompose()
+    mayor = max(t.volume() for t in partes)
+    # Fuera láminas finas (p. ej. la piel del costado del torso junto al brazo).
+    pieza = m3d.Manifold.batch_boolean([t for t in partes if t.volume() > 0.05 * mayor], m3d.OpType.Add)
+    return cuerpo - cortador, pieza
 
 
 def _semiespacio_plano(punto, normal, grande=1e4):
@@ -270,11 +288,9 @@ def dividir(malla: trimesh.Trimesh, plantilla: str = "6",
             res.avisos.append("No se encontró la entrepierna; las piernas quedan unidas.")
         else:
             corte = p.entrepierna
-            # Solo en la franja del torso: las manos que cuelgan más abajo no se tocan.
-            ancho = malla.extents[0]
-            xi = p.hombro_izq if p.hombro_izq is not None else p.centro_x - 0.3 * ancho
-            xd = p.hombro_der if p.hombro_der is not None else p.centro_x + 0.3 * ancho
-            cuerpo, ambas = _region(cuerpo, _caja(xmin=xi, xmax=xd, zmax=corte), lambda ts: ts[:2])
+            # Las dos piezas más grandes bajo la entrepierna; las manos que cuelgan
+            # más abajo son piezas aparte y no se tocan.
+            cuerpo, ambas = _region(cuerpo, _caja(zmax=corte), lambda ts: ts[:2])
             if ambas is not None:
                 juntas = any("pierna_izq" in g and "pierna_der" in g for g in grupos)
                 if juntas:
