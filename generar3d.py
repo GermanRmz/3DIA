@@ -53,12 +53,32 @@ def cargar_pipeline(dispositivo: str = "auto"):
             # la red cerca de la superficie. Es el paso que más tardaba.
             from hy3dgen.shapegen.models import ShapeVAE
 
-            _vae_normal = _pipeline.vae
+            # Los decodificadores van en fp32: en fp16 algunas GPUs (p. ej. RTX 20xx)
+            # pierden la superficie de ciertas imágenes y el modelo sale plano.
+            _vae_normal = _pipeline.vae.to(torch.float32)
             _pipeline.vae = ShapeVAE.from_pretrained(
                 carpeta, subfolder=modelos.VAE_RAPIDO, use_safetensors=True,
-                variant="fp16", device=dispositivo, dtype=torch.float16)
+                variant="fp16", device=dispositivo, dtype=torch.float32)
             _pipeline.enable_flashvdm(topk_mode="merge", replace_vae=False)
+            if torch.cuda.get_device_properties(0).total_memory / 1024 ** 3 < 8:
+                _codificador_bajo_demanda(_pipeline)
     return _pipeline
+
+
+def _codificador_bajo_demanda(pipeline):
+    """En GPUs de menos de 8 GB, el codificador de imagen (DINOv2, 2.3 GB) solo
+    está en la GPU mientras codifica; luego pasa a la CPU y deja sitio al resto."""
+    original = pipeline.encode_cond
+
+    def encode_cond(*args, **kwargs):
+        pipeline.conditioner.to(pipeline.device)
+        try:
+            return original(*args, **kwargs)
+        finally:
+            pipeline.conditioner.to("cpu")
+            torch.cuda.empty_cache()
+
+    pipeline.encode_cond = encode_cond
 
 
 _en_gpu_antes = False
@@ -105,7 +125,8 @@ def _una_forma(pipeline, imagen, pasos, resolucion, semilla, trozos):
                            "para comprobar si es un problema de la GPU.")
 
     def decodificar():
-        return pipeline._export(latentes, "trimesh", octree_resolution=resolucion,
+        tipo = next(pipeline.vae.parameters()).dtype
+        return pipeline._export(latentes.to(tipo), "trimesh", octree_resolution=resolucion,
                                 num_chunks=trozos)[0]
 
     if _vae_normal is None:
