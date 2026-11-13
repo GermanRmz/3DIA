@@ -26,8 +26,9 @@ DIRECCIONES = {
     "derecha": (1, 0, 0), "delante": (0, -1, 0), "detrás": (0, 1, 0),
 }
 NIVELES = 110
-VOLUMEN_MINIMO = 0.015   # fracción del volumen total para considerar un apéndice
+VOLUMEN_MINIMO = 0.008   # fracción del volumen total para considerar un apéndice
 VOLUMEN_MAXIMO = 0.35    # un apéndice no puede llevarse más de esto (protege el cuerpo)
+VOLUMEN_MAXIMO_CUELLO = 0.7  # en un estrechamiento claro (cabeza grande de chibi) se permite más
 LARGO_MINIMO = 0.06      # fracción del tamaño en esa dirección
 ALARGAMIENTO = 1.0       # largo mínimo / ancho del corte
 CORTE_MAXIMO = 0.3      # área del corte / sección más ancha de la figura
@@ -43,6 +44,7 @@ class Apendice:
     corte: float           # nivel del corte
     secciones: list        # CrossSections del trozo, del extremo al corte
     volumen: float
+    cuello: bool = False   # corte en un estrechamiento (si no, en una fusión)
 
 
 @dataclass
@@ -88,6 +90,7 @@ def _cadenas(m_marco, z0, z1):
 
     activas = []
     terminadas = []
+    registro = {}         # id -> cadena (para recuperar los antepasados de una fusión)
     for k, (z, trozos, solapes, sucesor) in enumerate(niveles):
         nuevas = []
         usadas = set()
@@ -123,22 +126,41 @@ def _cadenas(m_marco, z0, z1):
             else:
                 nuevas.append({"niveles": [z], "secciones": [t], "areas": [t.area()], "hijos": []})
         activas = nuevas
+        for c in activas:
+            registro[id(c)] = c
     terminadas += [(c, None, "fin") for c in activas]
-    return terminadas, paso, area_maxima
+    return terminadas, paso, area_maxima, registro
+
+
+def _antepasados(c, registro):
+    """Secciones e inicio de la cadena junto con todas las que se fundieron en ella."""
+    secciones, inicio, pendientes, vistos = [], c["niveles"][0], [c], set()
+    while pendientes:
+        x = pendientes.pop()
+        if id(x) in vistos:
+            continue
+        vistos.add(id(x))
+        secciones += x["secciones"]
+        inicio = min(inicio, x["niveles"][0])
+        pendientes += [registro[h] for h in x.get("hijos", []) if h in registro]
+    return secciones, inicio
 
 
 def _estrechamiento(areas):
-    """Índice de un cuello claro (área ≤ 45 % de lo anterior y luego ≥ 2.2 veces),
-    o None."""
+    """Primer cuello claro desde el extremo: un mínimo local con área ≤ 45 % de lo
+    anterior y que luego vuelve a crecer ≥ 1.6 veces (el cuerpo puede ser más
+    pequeño que la cabeza). Devuelve su índice o None."""
     a = np.convolve(np.asarray(areas), np.ones(3) / 3, mode="same")
-    mejor, ratio = None, 1.0
-    for i in range(3, len(a) - 3):
-        antes, despues = a[:i].max(), a[i:].max()
-        if a[i] <= 0.45 * antes and despues >= 2.2 * a[i]:
-            r = a[i] / antes
-            if r < ratio:
-                mejor, ratio = i, r
-    return mejor
+    i = 3
+    while i < len(a) - 3:
+        if a[i] <= 0.45 * a[:i].max() and a[i:].max() >= 1.6 * a[i]:
+            # Bajar hasta el mínimo local de este estrechamiento.
+            while i + 1 < len(a) - 3 and a[i + 1] <= a[i]:
+                i += 1
+            if a[i:].max() >= 1.6 * a[i]:
+                return i
+        i += 1
+    return None
 
 
 def detectar(malla: trimesh.Trimesh) -> list[Apendice]:
@@ -152,27 +174,25 @@ def detectar(malla: trimesh.Trimesh) -> list[Apendice]:
         b = np.asarray(mm.bounding_box())
         z0, z1 = b[2], b[5]
         tam = z1 - z0
-        cadenas, paso, area_maxima = _cadenas(mm, z0, z1)
+        cadenas, paso, area_maxima, registro = _cadenas(mm, z0, z1)
         aceptadas = set()
         for c, z_fusion, motivo in cadenas:
             areas = c["areas"]
             # Si de esta cadena ya salen apéndices (p. ej. dos patas que se unen en el
             # pecho), se prefieren esas piezas a cortar el grupo.
-            if any(h in aceptadas for h in c.get("hijos", [])):
-                aceptadas.add(id(c))
-                continue
+            grupo = any(h in aceptadas for h in c.get("hijos", []))
             cortes = []
-            if motivo == "fusion":
+            if motivo == "fusion" and not grupo:
                 n = max(1, len(areas) - 1)               # un nivel antes de la fusión
                 if areas[n - 1] >= 0.2 * max(areas[:n]):  # llega con grosor, no en hilo
-                    cortes.append(n)
+                    cortes.append((n, VOLUMEN_MAXIMO))
             cuello = _estrechamiento(areas)
             if cuello is not None and areas[cuello - 1] >= 0.04 * max(areas[:cuello]):
-                cortes.append(cuello)
-            for n in cortes:
+                cortes.append((cuello, VOLUMEN_MAXIMO_CUELLO))
+            for n, vol_max in cortes:
                 vol = float(sum(areas[:n]) * paso)
                 largo = c["niveles"][n - 1] - c["niveles"][0] + paso
-                if vol < VOLUMEN_MINIMO * total or vol > VOLUMEN_MAXIMO * total \
+                if vol < VOLUMEN_MINIMO * total or vol > vol_max * total \
                         or largo < LARGO_MINIMO * tam:
                     continue
                 # El corte debe ser fino comparado con la sección más ancha de la figura
@@ -189,11 +209,21 @@ def detectar(malla: trimesh.Trimesh) -> list[Apendice]:
                 solidez = np.mean([s.area() / max(s.hull().area(), 1e-9) for s in muestras])
                 if solidez < SOLIDEZ_MINIMA:
                     continue
-                candidatos.append(Apendice(nombre, float(c["niveles"][0] - paso),
-                                           float(c["niveles"][n - 1]), c["secciones"][:n], vol))
+                secciones, inicio = c["secciones"][:n], c["niveles"][0]
+                if vol_max == VOLUMEN_MAXIMO_CUELLO:
+                    # Corte en un cuello: la pieza es todo lo que hay más allá (la
+                    # cabeza entera con las orejas o cuernos que se fundieron en ella).
+                    previas, inicio = _antepasados(c, registro)
+                    secciones = previas + secciones
+                candidatos.append(Apendice(nombre, float(inicio - paso),
+                                           float(c["niveles"][n - 1]), secciones, vol,
+                                           cuello=vol_max == VOLUMEN_MAXIMO_CUELLO))
                 aceptadas.add(id(c))
                 break
-    return sorted(candidatos, key=lambda a: -a.volumen)
+    # Primero los apéndices que se funden en el cuerpo (patas, cola...), de mayor a
+    # menor, y al final los cortes de cuello: así las patas salen del cuerpo antes
+    # de separar la cabeza.
+    return sorted(candidatos, key=lambda a: (a.cuello, -a.volumen))
 
 
 def dividir(malla: trimesh.Trimesh, max_partes: int = 8,
@@ -203,6 +233,7 @@ def dividir(malla: trimesh.Trimesh, max_partes: int = 8,
     union = union or OpcionesUnion()
     res = DivisionForma()
     cuerpo = _a_manifold(malla)
+    volumen_total = cuerpo.volume()
     piezas = []
     cuentas = {}
     for a in detectar(malla):
@@ -229,6 +260,10 @@ def dividir(malla: trimesh.Trimesh, max_partes: int = 8,
             continue
         pieza = trozos[0]
         resto = cm - cortador
+        # Si casi no queda cuerpo, ese corte ya se hizo desde el otro lado (el mismo
+        # cuello visto desde arriba y desde abajo).
+        if resto.volume() < 0.15 * volumen_total:
+            continue
         for t in trozos[1:]:                       # lo que no es del apéndice vuelve
             if t.volume() > 1.0:
                 resto = resto + t
