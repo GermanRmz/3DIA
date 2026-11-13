@@ -4,26 +4,35 @@ Uso:
     python app.py
 y abre http://localhost:7860
 """
-import os
 import tempfile
+import time
 
 import gradio as gr
 
 from generar3d import generar
+from preparar_imagen import preparar
 
 
 def convertir(imagen, fondo, ajustar, pasos, resolucion, semilla, con_textura, resolucion_textura,
-              max_caras):
+              max_caras, progreso=gr.Progress(track_tqdm=True)):
+    """Genera paso a paso y va mostrando el avance en la página."""
     if imagen is None:
         raise gr.Error("Sube una imagen primero.")
+    inicio = time.time()
     salida = tempfile.NamedTemporaryFile(suffix=".glb", delete=False).name
     try:
-        generar(imagen, salida, int(pasos), int(resolucion), int(semilla),
-                textura=con_textura, fondo=FONDOS[fondo], ajustar=ajustar, resolucion_textura=int(resolucion_textura),
-                max_caras=int(max_caras))
+        progreso(0, desc="Preparando la imagen...")
+        preparada, notas = preparar(imagen, FONDOS[fondo], ajustar)
+        estado = "\n".join(f"- {n}" for n in notas)
+        pasos_txt = "forma y textura (unos minutos)" if con_textura else "forma"
+        yield preparada, None, None, estado + f"\n\n**Generando {pasos_txt}...**"
+
+        generar(preparada, salida, int(pasos), int(resolucion), int(semilla),
+                textura=con_textura, fondo="mantener", ajustar=False,
+                resolucion_textura=int(resolucion_textura), max_caras=int(max_caras))
     except RuntimeError as e:
         raise gr.Error(str(e))
-    return os.path.splitext(salida)[0] + "_entrada.png", salida, salida
+    yield preparada, salida, salida, estado + f"\n\n**Listo en {time.time() - inicio:.0f} s.**"
 
 
 FONDOS = {"Automático": "auto", "IA": "ia", "Fondo blanco (sin IA)": "blanco",
@@ -48,13 +57,15 @@ with gr.Blocks(title="Imagen a 3D") as demo:
                 max_caras = gr.Slider(10000, 100000, value=40000, step=5000,
                                       label="Caras máximas al pintar")
         with gr.Column():
+            estado = gr.Markdown()
             preparada = gr.Image(label="Imagen preparada (lo que recibe el modelo)", height=256)
             visor = gr.Model3D(label="Modelo 3D")
             archivo = gr.File(label="Descargar .glb")
     boton.click(convertir,
                 [entrada, fondo, ajustar, pasos, resolucion, semilla, con_textura, resolucion_textura,
                  max_caras],
-                [preparada, visor, archivo])
+                [preparada, visor, archivo, estado],
+                show_progress_on=[visor])
 
 if __name__ == "__main__":
     demo.queue().launch()
