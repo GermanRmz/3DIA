@@ -106,14 +106,24 @@ def generar_forma(imagen: Image.Image, pasos: int = 5, resolucion: int = 256,
         return pipeline._export(latentes, "trimesh", octree_resolution=resolucion,
                                 num_chunks=trozos)[0]
 
-    global _vae_normal
-    malla = decodificar()
-    if malla is None and _vae_normal is not None:
-        print("FlashVDM no encontró superficie; se repite con el decodificador normal "
-              "(más lento) y se usará ese a partir de ahora.")
-        pipeline.vae, _vae_normal = _vae_normal, None
-        torch.cuda.empty_cache()
+    if _vae_normal is None:
         malla = decodificar()
+    else:
+        # FlashVDM falla con algunas imágenes (no ve la superficie en su malla
+        # gruesa); en ese caso esta imagen se decodifica con el método normal.
+        try:
+            malla = decodificar()
+        except (RuntimeError, IndexError):
+            malla = None
+        if malla is None:
+            print("FlashVDM no encontró la superficie; se usa el decodificador normal "
+                  "para esta imagen (más lento).")
+            vae_rapido, pipeline.vae = pipeline.vae, _vae_normal
+            torch.cuda.empty_cache()
+            try:
+                malla = decodificar()
+            finally:
+                pipeline.vae = vae_rapido
     if malla is None:
         raise RuntimeError("El modelo no generó ninguna superficie. Prueba otra imagen "
                            "(un objeto centrado sobre fondo liso) u otra --semilla.")
