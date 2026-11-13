@@ -6,3 +6,6 @@ diffusers==0.35.2
 huggingface_hub<1
 opencv-python
 gradio
+# Para compilar el rasterizador de la textura (ver README)
+ninja
+pybind11

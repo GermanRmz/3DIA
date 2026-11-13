@@ -1,20 +1,21 @@
 """Convierte una imagen en un modelo 3D (.glb) usando Hunyuan3D-2.
 
 Uso:
-    python generar3d.py foto.png -o modelo.glb
+    python generar3d.py foto.png -o modelo.glb             # forma + textura
+    python generar3d.py foto.png -o modelo.glb --sin-textura
 """
 import argparse
 import time
+
+import modelos  # noqa: F401  (ajusta los timeouts de descarga antes de importar nada más)
 
 import cv2
 import numpy as np
 import torch
 from PIL import Image
 
-MODELO = "tencent/Hunyuan3D-2mini"
-SUBCARPETA = "hunyuan3d-dit-v2-mini-turbo"
-
 _pipeline = None
+_vae_normal = None  # decodificador original, por si FlashVDM falla
 
 
 def quitar_fondo(imagen: Image.Image, umbral: int = 235) -> Image.Image:
@@ -47,35 +48,110 @@ def elegir_dispositivo(dispositivo: str = "auto") -> str:
 
 
 def cargar_pipeline(dispositivo: str = "auto"):
-    """Carga el modelo una sola vez (la primera vez descarga ~8 GB)."""
-    global _pipeline
+    """Carga el modelo una sola vez (la primera vez descarga ~4 GB)."""
+    global _pipeline, _vae_normal
     if _pipeline is None:
         from hy3dgen.shapegen import Hunyuan3DDiTFlowMatchingPipeline
 
         dispositivo = elegir_dispositivo(dispositivo)
+        en_gpu = dispositivo == "cuda"
+        if en_gpu:
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
+        carpeta = modelos.carpeta_forma(con_vae_rapido=en_gpu)
         _pipeline = Hunyuan3DDiTFlowMatchingPipeline.from_pretrained(
-            MODELO,
-            subfolder=SUBCARPETA,
+            carpeta,
+            subfolder=modelos.DIT_FORMA,
             use_safetensors=True,
             variant="fp16",
             device=dispositivo,
-            dtype=torch.float16 if dispositivo == "cuda" else torch.float32,
+            dtype=torch.float16 if en_gpu else torch.float32,
         )
+        if en_gpu:
+            # FlashVDM: decodificador de volumen jerárquico que solo evalúa
+            # la red cerca de la superficie. Es el paso que más tardaba.
+            from hy3dgen.shapegen.models import ShapeVAE
+
+            _vae_normal = _pipeline.vae
+            _pipeline.vae = ShapeVAE.from_pretrained(
+                carpeta, subfolder=modelos.VAE_RAPIDO, use_safetensors=True,
+                variant="fp16", device=dispositivo, dtype=torch.float16)
+            _pipeline.enable_flashvdm(topk_mode="merge", replace_vae=False)
     return _pipeline
 
 
-def generar(imagen: Image.Image, salida: str, pasos: int = 5, resolucion: int = 256,
-            semilla: int = 0, dispositivo: str = "auto") -> str:
-    """Genera la malla 3D de `imagen` y la guarda en `salida` (.glb, .obj, .stl)."""
+def generar_forma(imagen: Image.Image, pasos: int = 5, resolucion: int = 256,
+                  semilla: int = 0, dispositivo: str = "auto"):
+    """Devuelve la malla (trimesh) generada a partir de una imagen sin fondo."""
     pipeline = cargar_pipeline(dispositivo)
-    malla = pipeline(
-        image=quitar_fondo(imagen),
+    # En GPU, trozos grandes = menos llamadas a la red, pero más VRAM.
+    trozos = 20000
+    if str(pipeline.device).startswith("cuda"):
+        vram_gb = torch.cuda.get_device_properties(0).total_memory / 1024 ** 3
+        trozos = 200000 if vram_gb >= 12 else 60000 if vram_gb >= 8 else 20000
+
+    latentes = pipeline(
+        image=imagen,
         num_inference_steps=pasos,
         octree_resolution=resolucion,
-        num_chunks=20000,
+        num_chunks=trozos,
         generator=torch.manual_seed(semilla),
-        output_type="trimesh",
-    )[0]
+        output_type="latent",
+    )
+    if not torch.isfinite(latentes).all():
+        raise RuntimeError("La difusión dio valores inválidos (NaN). Prueba con --dispositivo cpu "
+                           "para comprobar si es un problema de la GPU.")
+
+    def decodificar():
+        return pipeline._export(latentes, "trimesh", octree_resolution=resolucion,
+                                num_chunks=trozos)[0]
+
+    global _vae_normal
+    malla = decodificar()
+    if malla is None and _vae_normal is not None:
+        print("FlashVDM no encontró superficie; se repite con el decodificador normal "
+              "(más lento) y se usará ese a partir de ahora.")
+        pipeline.vae, _vae_normal = _vae_normal, None
+        torch.cuda.empty_cache()
+        malla = decodificar()
+    if malla is None:
+        raise RuntimeError("El modelo no generó ninguna superficie. Prueba otra imagen "
+                           "(un objeto centrado sobre fondo liso) u otra --semilla.")
+    return malla
+
+
+def generar(imagen: Image.Image, salida: str, pasos: int = 5, resolucion: int = 256,
+            semilla: int = 0, dispositivo: str = "auto", textura: bool = True,
+            **opciones_textura) -> str:
+    """Genera el modelo 3D de `imagen` y lo guarda en `salida` (.glb, .obj, .stl).
+
+    Con `textura=True` también lo pinta (necesita GPU); `opciones_textura` se
+    pasan a `textura.texturizar` (max_caras, resolucion_textura, pasos_vistas...).
+    """
+    imagen = quitar_fondo(imagen)
+    objeto = (np.array(imagen)[:, :, 3] > 127).mean()
+    print(f"Objeto: {objeto:.0%} de la imagen")
+    if objeto < 0.01:
+        raise RuntimeError("Al quitar el fondo no quedó casi nada del objeto. Usa una imagen "
+                           "con fondo transparente o un fondo que contraste con la figura.")
+    if objeto > 0.98:
+        print("Aviso: no se detectó fondo. El resultado es mejor con fondo blanco o transparente.")
+    if textura:
+        from textura import comprobar_dependencias
+        comprobar_dependencias()  # falla antes de gastar tiempo en la forma
+
+    t = time.time()
+    malla = generar_forma(imagen, pasos, resolucion, semilla, dispositivo)
+    print(f"Forma: {time.time() - t:.1f} s ({len(malla.faces)} caras)")
+
+    t = time.time()
+    if textura:
+        from textura import texturizar
+        malla = texturizar(malla, imagen, **opciones_textura)
+        print(f"Textura: {time.time() - t:.1f} s")
+    else:
+        from textura import preparar_malla
+        malla = preparar_malla(malla)
     malla.export(salida)
     return salida
 
@@ -84,16 +160,29 @@ def main():
     p = argparse.ArgumentParser(description="Imagen -> modelo 3D con Hunyuan3D-2")
     p.add_argument("imagen", help="Imagen de entrada (png, jpg, webp)")
     p.add_argument("-o", "--salida", default="modelo.glb", help="Archivo de salida (.glb, .obj, .stl)")
-    p.add_argument("--pasos", type=int, default=5, help="Pasos de difusión (el modelo turbo usa 5)")
+    p.add_argument("--pasos", type=int, default=5, help="Pasos de difusión de la forma (el modelo turbo usa 5)")
     p.add_argument("--resolucion", type=int, default=256,
                    help="Resolución de la malla; en CPU usa 128-192 para que no tarde tanto")
     p.add_argument("--semilla", type=int, default=0)
     p.add_argument("--dispositivo", default="auto", choices=["auto", "cuda", "cpu"])
+
+    t = p.add_argument_group("textura")
+    t.add_argument("--sin-textura", action="store_true", help="Solo la forma, sin color")
+    t.add_argument("--resolucion-textura", type=int, default=2048, choices=[1024, 2048],
+                   help="1024 es más rápido y gasta menos VRAM")
+    t.add_argument("--pasos-textura", type=int, default=15,
+                   help="Pasos de las vistas de color (el original usa 30)")
+    t.add_argument("--max-caras", type=int, default=40000,
+                   help="La malla se reduce a estas caras antes de pintarla")
+    t.add_argument("--vram-baja", action="store_true", default=None,
+                   help="Mueve los modelos a CPU cuando no se usan (auto si la GPU tiene <16 GB)")
     args = p.parse_args()
 
     inicio = time.time()
     generar(Image.open(args.imagen), args.salida, args.pasos, args.resolucion,
-            args.semilla, args.dispositivo)
+            args.semilla, args.dispositivo, textura=not args.sin_textura,
+            max_caras=args.max_caras, resolucion_textura=args.resolucion_textura,
+            pasos_vistas=args.pasos_textura, vram_baja=args.vram_baja)
     print(f"Listo: {args.salida} ({time.time() - inicio:.0f} s)")
 
 
