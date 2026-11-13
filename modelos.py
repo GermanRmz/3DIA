@@ -11,6 +11,8 @@ import time
 # Conexiones lentas: más margen antes de dar una descarga por perdida.
 os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "120")
 os.environ.setdefault("HF_HUB_ETAG_TIMEOUT", "60")
+# Menos fragmentación de memoria en GPUs pequeñas (antes de importar torch).
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 REPO_FORMA = "tencent/Hunyuan3D-2mini"
 DIT_FORMA = "hunyuan3d-dit-v2-mini-turbo"

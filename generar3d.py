@@ -84,29 +84,36 @@ def generar_forma(imagen: Image.Image, pasos: int = 5, resolucion: int = 256,
                   semilla: int = 0, dispositivo: str = "auto"):
     """Devuelve la malla (trimesh) generada a partir de una imagen sin fondo."""
     pipeline = cargar_pipeline(dispositivo)
-    # En GPU, trozos grandes = muchas menos llamadas a la red (según la VRAM).
+    # En GPU, trozos grandes = menos llamadas a la red, pero más VRAM.
     trozos = 20000
     if str(pipeline.device).startswith("cuda"):
         vram_gb = torch.cuda.get_device_properties(0).total_memory / 1024 ** 3
-        trozos = 200000 if vram_gb >= 12 else 80000
-    def ejecutar():
-        return pipeline(
-            image=imagen,
-            num_inference_steps=pasos,
-            octree_resolution=resolucion,
-            num_chunks=trozos,
-            generator=torch.manual_seed(semilla),
-            output_type="trimesh",
-        )[0]
+        trozos = 200000 if vram_gb >= 12 else 60000 if vram_gb >= 8 else 20000
+
+    latentes = pipeline(
+        image=imagen,
+        num_inference_steps=pasos,
+        octree_resolution=resolucion,
+        num_chunks=trozos,
+        generator=torch.manual_seed(semilla),
+        output_type="latent",
+    )
+    if not torch.isfinite(latentes).all():
+        raise RuntimeError("La difusión dio valores inválidos (NaN). Prueba con --dispositivo cpu "
+                           "para comprobar si es un problema de la GPU.")
+
+    def decodificar():
+        return pipeline._export(latentes, "trimesh", octree_resolution=resolucion,
+                                num_chunks=trozos)[0]
 
     global _vae_normal
-    malla = ejecutar()
+    malla = decodificar()
     if malla is None and _vae_normal is not None:
         print("FlashVDM no encontró superficie; se repite con el decodificador normal "
               "(más lento) y se usará ese a partir de ahora.")
         pipeline.vae, _vae_normal = _vae_normal, None
         torch.cuda.empty_cache()
-        malla = ejecutar()
+        malla = decodificar()
     if malla is None:
         raise RuntimeError("El modelo no generó ninguna superficie. Prueba otra imagen "
                            "(un objeto centrado sobre fondo liso) u otra --semilla.")
