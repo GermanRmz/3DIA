@@ -11,15 +11,14 @@ import gradio as gr
 from generar3d import generar
 
 
-def convertir(imagen, pasos, resolucion, semilla, con_textura, resolucion_textura,
-              pasos_textura, max_caras):
+def convertir(imagen, pasos, resolucion, semilla, con_textura, resolucion_textura, max_caras):
     if imagen is None:
         raise gr.Error("Sube una imagen primero.")
     salida = tempfile.NamedTemporaryFile(suffix=".glb", delete=False).name
     try:
         generar(imagen, salida, int(pasos), int(resolucion), int(semilla),
                 textura=con_textura, resolucion_textura=int(resolucion_textura),
-                pasos_vistas=int(pasos_textura), max_caras=int(max_caras))
+                max_caras=int(max_caras))
     except RuntimeError as e:
         raise gr.Error(str(e))
     return salida, salida
@@ -39,16 +38,13 @@ with gr.Blocks(title="Imagen a 3D") as demo:
                 semilla = gr.Number(value=0, precision=0, label="Semilla")
             with gr.Accordion("Opciones de textura", open=False):
                 resolucion_textura = gr.Radio([1024, 2048], value=2048, label="Resolución de la textura")
-                pasos_textura = gr.Slider(5, 30, value=15, step=1,
-                                          label="Pasos de las vistas de color (más = mejor y más lento)")
                 max_caras = gr.Slider(10000, 100000, value=40000, step=5000,
                                       label="Caras máximas al pintar")
         with gr.Column():
             visor = gr.Model3D(label="Modelo 3D")
             archivo = gr.File(label="Descargar .glb")
     boton.click(convertir,
-                [entrada, pasos, resolucion, semilla, con_textura, resolucion_textura,
-                 pasos_textura, max_caras],
+                [entrada, pasos, resolucion, semilla, con_textura, resolucion_textura, max_caras],
                 [visor, archivo])
 
 if __name__ == "__main__":

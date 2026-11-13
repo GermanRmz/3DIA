@@ -50,6 +50,8 @@ def elegir_dispositivo(dispositivo: str = "auto") -> str:
 def cargar_pipeline(dispositivo: str = "auto"):
     """Carga el modelo una sola vez (la primera vez descarga ~4 GB)."""
     global _pipeline, _vae_normal
+    if _pipeline is not None and _pipeline.device.type == "cpu" and _en_gpu_antes:
+        _mover_forma("cuda")
     if _pipeline is None:
         from hy3dgen.shapegen import Hunyuan3DDiTFlowMatchingPipeline
 
@@ -78,6 +80,26 @@ def cargar_pipeline(dispositivo: str = "auto"):
                 variant="fp16", device=dispositivo, dtype=torch.float16)
             _pipeline.enable_flashvdm(topk_mode="merge", replace_vae=False)
     return _pipeline
+
+
+_en_gpu_antes = False
+
+
+def _mover_forma(dispositivo: str):
+    _pipeline.to(dispositivo)
+    if _vae_normal is not None:
+        _vae_normal.to(dispositivo)
+
+
+def liberar_gpu_forma():
+    """Pasa el modelo de forma a la CPU para dejar la VRAM a la textura (GPUs <12 GB)."""
+    global _en_gpu_antes
+    if _pipeline is None or _pipeline.device.type != "cuda":
+        return
+    if torch.cuda.get_device_properties(0).total_memory / 1024 ** 3 < 12:
+        _mover_forma("cpu")
+        _en_gpu_antes = True
+        torch.cuda.empty_cache()
 
 
 def generar_forma(imagen: Image.Image, pasos: int = 5, resolucion: int = 256,
@@ -126,7 +148,7 @@ def generar(imagen: Image.Image, salida: str, pasos: int = 5, resolucion: int = 
     """Genera el modelo 3D de `imagen` y lo guarda en `salida` (.glb, .obj, .stl).
 
     Con `textura=True` también lo pinta (necesita GPU); `opciones_textura` se
-    pasan a `textura.texturizar` (max_caras, resolucion_textura, pasos_vistas...).
+    pasan a `textura.texturizar` (max_caras, resolucion_textura...).
     """
     imagen = quitar_fondo(imagen)
     objeto = (np.array(imagen)[:, :, 3] > 127).mean()
@@ -147,6 +169,7 @@ def generar(imagen: Image.Image, salida: str, pasos: int = 5, resolucion: int = 
     t = time.time()
     if textura:
         from textura import texturizar
+        liberar_gpu_forma()
         malla = texturizar(malla, imagen, **opciones_textura)
         print(f"Textura: {time.time() - t:.1f} s")
     else:
@@ -170,8 +193,6 @@ def main():
     t.add_argument("--sin-textura", action="store_true", help="Solo la forma, sin color")
     t.add_argument("--resolucion-textura", type=int, default=2048, choices=[1024, 2048],
                    help="1024 es más rápido y gasta menos VRAM")
-    t.add_argument("--pasos-textura", type=int, default=15,
-                   help="Pasos de las vistas de color (el original usa 30)")
     t.add_argument("--max-caras", type=int, default=40000,
                    help="La malla se reduce a estas caras antes de pintarla")
     t.add_argument("--vram-baja", action="store_true", default=None,
@@ -182,7 +203,7 @@ def main():
     generar(Image.open(args.imagen), args.salida, args.pasos, args.resolucion,
             args.semilla, args.dispositivo, textura=not args.sin_textura,
             max_caras=args.max_caras, resolucion_textura=args.resolucion_textura,
-            pasos_vistas=args.pasos_textura, vram_baja=args.vram_baja)
+            vram_baja=args.vram_baja)
     print(f"Listo: {args.salida} ({time.time() - inicio:.0f} s)")
 
 

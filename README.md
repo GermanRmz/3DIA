@@ -9,16 +9,17 @@ Incluye:
 - `app.py`: app web para subir la imagen, ver el modelo y descargarlo.
 - `textura.py`: pinta la malla con Hunyuan3D-Paint (turbo).
 - `relleno_uv.py`: relleno rápido de los huecos de la textura.
+- `rasterizador.py`: rasterizador en PyTorch (sustituye al módulo CUDA compilado).
+- `modelos.py`: descarga de pesos con reintentos.
 
 ## Requisitos
 
 - Python 3.10 a 3.12 y Git.
-- GPU NVIDIA. Solo forma: 6 GB de VRAM. Forma + textura: 12 GB o más
-  (con menos de 16 GB los modelos se mueven a CPU cuando no se usan).
+- GPU NVIDIA con 6 GB de VRAM o más (con menos de 16 GB, los modelos de
+  textura se mueven a la GPU solo mientras se usan).
   En CPU solo se puede generar la forma, y tarda decenas de minutos.
-- Unos 20 GB de disco para los pesos, que se descargan solos la primera vez.
-- Para la textura: [CUDA Toolkit 12.4](https://developer.nvidia.com/cuda-12-4-0-download-archive)
-  y, en Windows, Visual Studio Build Tools con "Desarrollo para el escritorio con C++".
+- Unos 4 GB de disco para los pesos de la forma, que se descargan solos la primera vez.
+- Para la textura, unos 14 GB más de pesos y 16 GB de RAM si la GPU tiene poca VRAM.
 
 ## Instalación
 
@@ -36,29 +37,14 @@ pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
 pip install -r requirements.txt
 ```
 
-### Textura (una sola vez)
+### Textura
 
-El texturizado usa un rasterizador CUDA que hay que compilar.
+No hace falta compilar nada: el rasterizador de Hunyuan3D-2 (CUDA) está
+reimplementado en PyTorch puro en `rasterizador.py`. Si aun así tienes compilado
+`custom_rasterizer`, se usa ese.
 
-1. Mira qué CUDA usa tu PyTorch: `python -c "import torch; print(torch.version.cuda)"`
-   (por ejemplo `12.4`) e instala el **CUDA Toolkit** de esa misma versión.
-2. En Windows abre "x64 Native Tools Command Prompt for VS 2022", entra en la
-   carpeta del proyecto, activa el entorno (`venv\Scripts\activate`) y ejecuta
-   (cambia `v12.4` por tu versión):
-
-```bat
-set CUDA_HOME=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4
-set PATH=%CUDA_HOME%\bin;%PATH%
-set DISTUTILS_USE_SDK=1
-pip install --no-build-isolation "git+https://github.com/Tencent-Hunyuan/Hunyuan3D-2#subdirectory=hy3dgen/texgen/custom_rasterizer"
-```
-
-En Linux basta con `export CUDA_HOME=/usr/local/cuda` y el `pip install` de arriba.
-Si sale "unsupported Microsoft Visual Studio version", añade antes
-`set NVCC_APPEND_FLAGS=-allow-unsupported-compiler`.
-
-Comprueba que quedó bien con `python -c "import custom_rasterizer"`.
-Si no lo instalas, puedes seguir generando solo la forma con `--sin-textura`.
+Con poca VRAM (por ejemplo 6 GB) los modelos de pintura se cargan en la RAM y se
+suben a la GPU solo mientras se usan, así que conviene tener 16 GB de RAM.
 
 ## Uso
 
@@ -80,7 +66,6 @@ Opciones útiles:
 - `--resolucion 192`: forma más rápida, menos detalle.
 - `--semilla 1`: otra variante.
 - `--resolucion-textura 1024`: textura más rápida y con menos VRAM.
-- `--pasos-textura 30`: más calidad de color (por defecto 15).
 - `--max-caras 20000`: menos caras al pintar, más rápido.
 - `--vram-baja`: fuerza a mover modelos a la CPU si te quedas sin memoria.
 
@@ -88,7 +73,7 @@ Opciones útiles:
 
 - Forma: decodificador FlashVDM (solo evalúa cerca de la superficie) y trozos
   grandes en GPU.
-- Textura: modelo de pintura turbo, menos pasos de difusión, malla reducida antes
+- Textura: modelo de pintura turbo, la mitad de pasos al quitar luces y sombras, malla reducida antes
   de desplegar UVs y relleno de huecos vectorizado (~5x más rápido que el original).
 - Los modelos se cargan una sola vez: en la app web la primera generación es la
   más lenta.
