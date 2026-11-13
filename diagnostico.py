@@ -42,7 +42,7 @@ def main():
                                           ("B. FlashVDM fp16", rapido, torch.float16, 20000),
                                           ("C. normal fp32", normal, torch.float32, 20000),
                                           ("D. normal fp16", normal, torch.float16, 20000)):
-            vae.to(tipo)
+            vae.to("cuda", tipo)
             p.vae = vae
             torch.cuda.empty_cache()
             t = time.time()
@@ -54,6 +54,8 @@ def main():
                 continue
             finally:
                 vae.to(torch.float32)
+                if vae is normal and g._gpu_pequena:
+                    vae.to("cpu")
             if malla is None:
                 print(f"  {nombre}: sin superficie")
                 continue

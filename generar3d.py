@@ -18,6 +18,7 @@ from preparar_imagen import preparar
 
 _pipeline = None
 _vae_normal = None  # decodificador original, por si FlashVDM falla
+_gpu_pequena = False  # <8 GB: codificador y decodificador normal viven en la CPU
 
 
 def elegir_dispositivo(dispositivo: str = "auto") -> str:
@@ -28,7 +29,7 @@ def elegir_dispositivo(dispositivo: str = "auto") -> str:
 
 def cargar_pipeline(dispositivo: str = "auto"):
     """Carga el modelo una sola vez (la primera vez descarga ~4 GB)."""
-    global _pipeline, _vae_normal
+    global _pipeline, _vae_normal, _gpu_pequena
     if _pipeline is not None and _pipeline.device.type == "cpu" and _en_gpu_antes:
         _mover_forma("cuda")
     if _pipeline is None:
@@ -53,15 +54,20 @@ def cargar_pipeline(dispositivo: str = "auto"):
             # la red cerca de la superficie. Es el paso que más tardaba.
             from hy3dgen.shapegen.models import ShapeVAE
 
+            _gpu_pequena = torch.cuda.get_device_properties(0).total_memory / 1024 ** 3 < 8
+            if _gpu_pequena:
+                # El codificador de imagen (2.3 GB) solo sube a la GPU para codificar.
+                _pipeline.conditioner.to("cpu")
+                _codificador_bajo_demanda(_pipeline)
             # Los decodificadores van en fp32: en fp16 algunas GPUs (p. ej. RTX 20xx)
             # pierden la superficie de ciertas imágenes y el modelo sale plano.
-            _vae_normal = _pipeline.vae.to(torch.float32)
+            # El normal (solo de reserva) espera en la CPU si la GPU es pequeña.
+            _vae_normal = _pipeline.vae.to("cpu" if _gpu_pequena else dispositivo, torch.float32)
+            torch.cuda.empty_cache()
             _pipeline.vae = ShapeVAE.from_pretrained(
                 carpeta, subfolder=modelos.VAE_RAPIDO, use_safetensors=True,
                 variant="fp16", device=dispositivo, dtype=torch.float32)
             _pipeline.enable_flashvdm(topk_mode="merge", replace_vae=False)
-            if torch.cuda.get_device_properties(0).total_memory / 1024 ** 3 < 8:
-                _codificador_bajo_demanda(_pipeline)
     return _pipeline
 
 
@@ -85,6 +91,12 @@ _en_gpu_antes = False
 
 
 def _mover_forma(dispositivo: str):
+    if dispositivo == "cuda" and _gpu_pequena:
+        # Solo el generador y el decodificador rápido; el resto sube bajo demanda.
+        _pipeline.model.to(dispositivo)
+        _pipeline.vae.to(dispositivo)
+        _pipeline.device = torch.device(dispositivo)
+        return
     _pipeline.to(dispositivo)
     if _vae_normal is not None:
         _vae_normal.to(dispositivo)
@@ -140,12 +152,15 @@ def _una_forma(pipeline, imagen, pasos, resolucion, semilla, trozos):
     if malla is None:
         print("FlashVDM no encontró la superficie; se usa el decodificador normal "
               "para esta imagen (más lento).")
-        vae_rapido, pipeline.vae = pipeline.vae, _vae_normal
+        vae_rapido, pipeline.vae = pipeline.vae, _vae_normal.to(pipeline.device)
         torch.cuda.empty_cache()
         try:
             malla = decodificar()
         finally:
             pipeline.vae = vae_rapido
+            if _gpu_pequena:
+                _vae_normal.to("cpu")
+                torch.cuda.empty_cache()
     return malla
 
 
