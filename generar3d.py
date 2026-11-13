@@ -7,13 +7,12 @@ Uso:
 import argparse
 import time
 
+import modelos  # noqa: F401  (ajusta los timeouts de descarga antes de importar nada más)
+
 import cv2
 import numpy as np
 import torch
 from PIL import Image
-
-MODELO = "tencent/Hunyuan3D-2mini"
-SUBCARPETA = "hunyuan3d-dit-v2-mini-turbo"
 
 _pipeline = None
 
@@ -48,27 +47,34 @@ def elegir_dispositivo(dispositivo: str = "auto") -> str:
 
 
 def cargar_pipeline(dispositivo: str = "auto"):
-    """Carga el modelo una sola vez (la primera vez descarga ~3 GB)."""
+    """Carga el modelo una sola vez (la primera vez descarga ~4 GB)."""
     global _pipeline
     if _pipeline is None:
         from hy3dgen.shapegen import Hunyuan3DDiTFlowMatchingPipeline
 
         dispositivo = elegir_dispositivo(dispositivo)
-        if dispositivo == "cuda":
+        en_gpu = dispositivo == "cuda"
+        if en_gpu:
             torch.backends.cuda.matmul.allow_tf32 = True
             torch.backends.cudnn.allow_tf32 = True
+        carpeta = modelos.carpeta_forma(con_vae_rapido=en_gpu)
         _pipeline = Hunyuan3DDiTFlowMatchingPipeline.from_pretrained(
-            MODELO,
-            subfolder=SUBCARPETA,
+            carpeta,
+            subfolder=modelos.DIT_FORMA,
             use_safetensors=True,
             variant="fp16",
             device=dispositivo,
-            dtype=torch.float16 if dispositivo == "cuda" else torch.float32,
+            dtype=torch.float16 if en_gpu else torch.float32,
         )
-        if dispositivo == "cuda":
+        if en_gpu:
             # FlashVDM: decodificador de volumen jerárquico que solo evalúa
             # la red cerca de la superficie. Es el paso que más tardaba.
-            _pipeline.enable_flashvdm(topk_mode="merge")
+            from hy3dgen.shapegen.models import ShapeVAE
+
+            _pipeline.vae = ShapeVAE.from_pretrained(
+                carpeta, subfolder=modelos.VAE_RAPIDO, use_safetensors=True,
+                variant="fp16", device=dispositivo, dtype=torch.float16)
+            _pipeline.enable_flashvdm(topk_mode="merge", replace_vae=False)
     return _pipeline
 
 

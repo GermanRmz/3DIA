@@ -15,10 +15,8 @@ Necesita GPU NVIDIA y el módulo compilado `custom_rasterizer` (ver README).
 """
 import torch
 
+import modelos
 from relleno_uv import rellenar_textura
-
-MODELO_PINTURA = "tencent/Hunyuan3D-2"
-SUBCARPETA_PINTURA = "hunyuan3d-paint-v2-0-turbo"
 
 _pintor = None
 _config_pintor = None
@@ -69,7 +67,7 @@ def comprobar_dependencias():
 
 def cargar_pintor(resolucion_textura: int = 2048, pasos_vistas: int = 15,
                   pasos_luz: int = 25, vram_baja: bool | None = None):
-    """Carga el modelo de pintura una sola vez (la primera vez descarga ~6 GB)."""
+    """Carga el modelo de pintura una sola vez (la primera vez descarga ~15 GB)."""
     global _pintor, _config_pintor
     comprobar_dependencias()
     if vram_baja is None:
@@ -82,7 +80,8 @@ def cargar_pintor(resolucion_textura: int = 2048, pasos_vistas: int = 15,
         MeshRender.uv_inpaint = _uv_inpaint_rapido
         _pintor = None
         torch.cuda.empty_cache()
-        _pintor = Hunyuan3DPaintPipeline.from_pretrained(MODELO_PINTURA, subfolder=SUBCARPETA_PINTURA)
+        _pintor = Hunyuan3DPaintPipeline.from_pretrained(modelos.carpeta_pintura(),
+                                                         subfolder=modelos.PINTURA)
         if vram_baja:
             _pintor.enable_model_cpu_offload()
         for nombre in ("delight_model", "multiview_model"):
