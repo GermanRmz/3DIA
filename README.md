@@ -13,6 +13,7 @@ Incluye:
 - `modelos.py`: descarga de pesos con reintentos.
 - `preparar_imagen.py`: analiza la imagen y quita el fondo antes de generar.
 - `acabados.py`: relieves de superficie para impresión 3D (tejido, moleteado...).
+- `multicolor.py`: 3MF pintado por filamentos para impresoras multicolor.
 
 ## Requisitos
 
@@ -96,6 +97,26 @@ python generar3d.py gato.jpg -o gato.glb --acabado tejido --altura-mm 60
 Ajusta con `--escala-acabado` y `--profundidad-acabado` (mm). Para que el relieve
 se note, el patrón debe ser varias veces mayor que el diámetro de la boquilla
 (con 0.4 mm, patrones de 2 mm o más) y la profundidad de al menos 0.3 mm.
+
+### Impresoras multicolor
+
+Con textura y `--colores N` (o el control "Colores de filamento" de la app) se
+genera además `<salida>_impresion_color.3mf`: la textura se reduce a N colores
+como máximo (los casi iguales se unen) y cada triángulo queda pintado con su
+filamento, en el formato de pintura de Bambu Studio / OrcaSlicer (`paint_color`)
+y de PrusaSlicer (`mmu_segmentation`). Al abrirlo, asigna a cada filamento el
+color que indica el programa al terminar (el filamento 1 es el más abundante).
+
+```bash
+python generar3d.py gato.jpg -o gato.glb --acabado tejido --colores 4
+```
+
+### Modelos planos
+
+Si el modelo sale plano (lado menor menos del 25 % del mayor, como un recorte de
+cartón), se prueban automáticamente otras semillas (`--intentos`, 3 por defecto)
+y se queda el más grueso. Los dibujos 2D de colores planos tienden a salir así;
+una imagen con sombras o en vista 3/4 da más volumen.
 
 ## Velocidad
 

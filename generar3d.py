@@ -10,6 +10,7 @@ import time
 
 import modelos  # noqa: F401  (ajusta los timeouts de descarga antes de importar nada más)
 
+import numpy as np
 import torch
 from PIL import Image
 
@@ -80,16 +81,17 @@ def liberar_gpu_forma():
         torch.cuda.empty_cache()
 
 
-def generar_forma(imagen: Image.Image, pasos: int = 5, resolucion: int = 256,
-                  semilla: int = 0, dispositivo: str = "auto"):
-    """Devuelve la malla (trimesh) generada a partir de una imagen sin fondo."""
-    pipeline = cargar_pipeline(dispositivo)
-    # En GPU, trozos grandes = menos llamadas a la red, pero más VRAM.
-    trozos = 20000
-    if str(pipeline.device).startswith("cuda"):
-        vram_gb = torch.cuda.get_device_properties(0).total_memory / 1024 ** 3
-        trozos = 200000 if vram_gb >= 12 else 60000 if vram_gb >= 8 else 20000
+GROSOR_MINIMO = 0.25  # lado menor / lado mayor; por debajo el modelo se considera "plano"
 
+
+def grosor(malla) -> float:
+    """Lado menor / lado mayor de la caja del modelo (robusto a trozos sueltos)."""
+    v = np.asarray(malla.vertices)
+    lados = np.percentile(v, 98, axis=0) - np.percentile(v, 2, axis=0)
+    return float(lados.min() / max(lados.max(), 1e-9))
+
+
+def _una_forma(pipeline, imagen, pasos, resolucion, semilla, trozos):
     latentes = pipeline(
         image=imagen,
         num_inference_steps=pasos,
@@ -107,42 +109,82 @@ def generar_forma(imagen: Image.Image, pasos: int = 5, resolucion: int = 256,
                                 num_chunks=trozos)[0]
 
     if _vae_normal is None:
+        return decodificar()
+    # FlashVDM falla con algunas imágenes (no ve la superficie en su malla
+    # gruesa); en ese caso esta imagen se decodifica con el método normal.
+    try:
         malla = decodificar()
-    else:
-        # FlashVDM falla con algunas imágenes (no ve la superficie en su malla
-        # gruesa); en ese caso esta imagen se decodifica con el método normal.
+    except (RuntimeError, IndexError):
+        malla = None
+    if malla is None:
+        print("FlashVDM no encontró la superficie; se usa el decodificador normal "
+              "para esta imagen (más lento).")
+        vae_rapido, pipeline.vae = pipeline.vae, _vae_normal
+        torch.cuda.empty_cache()
         try:
             malla = decodificar()
-        except (RuntimeError, IndexError):
-            malla = None
+        finally:
+            pipeline.vae = vae_rapido
+    return malla
+
+
+def generar_forma(imagen: Image.Image, pasos: int = 5, resolucion: int = 256,
+                  semilla: int = 0, dispositivo: str = "auto", intentos: int = 3):
+    """Devuelve la malla (trimesh) generada a partir de una imagen sin fondo.
+
+    Si sale plana (como un recorte de cartón), prueba hasta `intentos` semillas
+    y se queda con la más gruesa: la difusión solo tarda unos segundos.
+    """
+    pipeline = cargar_pipeline(dispositivo)
+    # En GPU, trozos grandes = menos llamadas a la red, pero más VRAM.
+    trozos = 20000
+    if str(pipeline.device).startswith("cuda"):
+        vram_gb = torch.cuda.get_device_properties(0).total_memory / 1024 ** 3
+        trozos = 200000 if vram_gb >= 12 else 60000 if vram_gb >= 8 else 20000
+
+    mejor, mejor_grosor = None, -1.0
+    for intento in range(max(intentos, 1)):
+        malla = _una_forma(pipeline, imagen, pasos, resolucion, semilla + intento, trozos)
         if malla is None:
-            print("FlashVDM no encontró la superficie; se usa el decodificador normal "
-                  "para esta imagen (más lento).")
-            vae_rapido, pipeline.vae = pipeline.vae, _vae_normal
-            torch.cuda.empty_cache()
-            try:
-                malla = decodificar()
-            finally:
-                pipeline.vae = vae_rapido
-    if malla is None:
+            continue
+        g = grosor(malla)
+        if g > mejor_grosor:
+            mejor, mejor_grosor = malla, g
+        if g >= GROSOR_MINIMO:
+            break
+        if intento + 1 < intentos:
+            print(f"El modelo salió plano (grosor {g:.0%}); se prueba la semilla {semilla + intento + 1}.")
+    if mejor is None:
         raise RuntimeError("El modelo no generó ninguna superficie. Prueba otra imagen "
                            "(un objeto centrado sobre fondo liso) u otra --semilla.")
-    return malla
+    if mejor_grosor < GROSOR_MINIMO:
+        print(f"Aviso: el modelo sigue siendo plano (grosor {mejor_grosor:.0%}). Suele pasar con "
+              "dibujos 2D de colores planos; una imagen con sombras o en vista 3/4 da más volumen.")
+    else:
+        print(f"Grosor del modelo: {mejor_grosor:.0%}")
+    return mejor
 
 
 def ruta_impresion(salida: str) -> str:
     return os.path.splitext(salida)[0] + "_impresion.stl"
 
 
+def ruta_color(salida: str, extension: str) -> str:
+    return os.path.splitext(salida)[0] + "_impresion_color" + extension
+
+
 def generar(imagen: Image.Image, salida: str, pasos: int = 5, resolucion: int = 256,
             semilla: int = 0, dispositivo: str = "auto", textura: bool = True,
-            fondo: str = "auto", ajustar: bool = True, acabado: str | None = None,
+            fondo: str = "auto", ajustar: bool = True, intentos: int = 3,
+            acabado: str | None = None, colores: int = 1,
             altura_mm: float = 60, escala_acabado: float | None = None,
             profundidad_acabado: float | None = None, **opciones_textura) -> str:
     """Genera el modelo 3D de `imagen` y lo guarda en `salida` (.glb, .obj, .stl).
 
     Con `acabado` (un nombre de acabados.ACABADOS o "ninguno") también guarda
     *_impresion.stl: en mm, Z arriba, apoyado en la cama y con el relieve elegido.
+    Si además hay textura y `colores` > 1, guarda *_impresion_color.3mf con cada
+    triángulo pintado con uno de `colores` filamentos (y una vista previa .glb).
 
     Con `textura=True` también lo pinta (necesita GPU); `opciones_textura` se
     pasan a `textura.texturizar` (max_caras, resolucion_textura...).
@@ -157,7 +199,7 @@ def generar(imagen: Image.Image, salida: str, pasos: int = 5, resolucion: int = 
         comprobar_dependencias()  # falla antes de gastar tiempo en la forma
 
     t = time.time()
-    malla = generar_forma(imagen, pasos, resolucion, semilla, dispositivo)
+    malla = generar_forma(imagen, pasos, resolucion, semilla, dispositivo, intentos)
     print(f"Forma: {time.time() - t:.1f} s ({len(malla.faces)} caras)")
 
     from textura import preparar_malla
@@ -182,6 +224,15 @@ def generar(imagen: Image.Image, salida: str, pasos: int = 5, resolucion: int = 
         liberar_gpu_forma()
         malla = texturizar(malla, imagen, **opciones_textura)
         print(f"Textura: {time.time() - t:.1f} s")
+        if acabado is not None and colores > 1:
+            import multicolor
+
+            t = time.time()
+            paleta = multicolor.pintar_impresion(impresion, malla, colores,
+                                                 ruta_color(salida, ".3mf"), ruta_color(salida, ".glb"))
+            lista = ", ".join(f"{i + 1}: #{r:02X}{g:02X}{b:02X}" for i, (r, g, b) in enumerate(paleta))
+            print(f"Multicolor: {ruta_color(salida, '.3mf')} ({time.time() - t:.1f} s). "
+                  f"Filamentos -> {lista}")
     malla.export(salida)
     return salida
 
@@ -194,6 +245,8 @@ def main():
     p.add_argument("--resolucion", type=int, default=256,
                    help="Resolución de la malla; en CPU usa 128-192 para que no tarde tanto")
     p.add_argument("--semilla", type=int, default=0)
+    p.add_argument("--intentos", type=int, default=3,
+                   help="Si el modelo sale plano, cuántas semillas probar (1 = no reintentar)")
     p.add_argument("--dispositivo", default="auto", choices=["auto", "cuda", "cpu"])
     p.add_argument("--fondo", default="auto", choices=["auto", "ia", "blanco", "mantener"],
                    help="Cómo quitar el fondo: auto (transparencia si la hay, si no IA), "
@@ -214,6 +267,9 @@ def main():
     i.add_argument("--acabado", choices=["ninguno"] + list(acabados.ACABADOS),
                    help="Relieve de la superficie: " + ", ".join(
                        f"{k} ({v[3].lower()})" for k, v in acabados.ACABADOS.items()))
+    i.add_argument("--colores", type=int, default=1,
+                   help="Filamentos para impresora multicolor (2-16): genera un 3MF pintado. "
+                        "Necesita textura")
     i.add_argument("--altura-mm", type=float, default=60, help="Altura de la pieza impresa (mm)")
     i.add_argument("--escala-acabado", type=float, help="Tamaño del patrón en mm")
     i.add_argument("--profundidad-acabado", type=float, help="Profundidad del relieve en mm")
@@ -222,7 +278,8 @@ def main():
     inicio = time.time()
     generar(Image.open(args.imagen), args.salida, args.pasos, args.resolucion,
             args.semilla, args.dispositivo, textura=not args.sin_textura, fondo=args.fondo,
-            ajustar=not args.sin_ajustar, acabado=args.acabado, altura_mm=args.altura_mm,
+            ajustar=not args.sin_ajustar, intentos=args.intentos, acabado=args.acabado,
+            colores=args.colores, altura_mm=args.altura_mm,
             escala_acabado=args.escala_acabado, profundidad_acabado=args.profundidad_acabado,
             max_caras=args.max_caras, resolucion_textura=args.resolucion_textura,
             vram_baja=args.vram_baja)

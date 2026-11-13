@@ -144,22 +144,29 @@ ACABADOS = {
 
 def a_impresion(malla: trimesh.Trimesh, altura_mm: float) -> trimesh.Trimesh:
     """Escala a `altura_mm`, pone Z hacia arriba (el modelo viene con Y arriba)
-    y lo apoya en la cama."""
+    y lo apoya en la cama. La matriz usada queda en metadata["transformacion"]."""
     malla = trimesh.Trimesh(malla.vertices.copy(), malla.faces.copy(), process=True)
-    malla.apply_transform(trimesh.transformations.rotation_matrix(np.pi / 2, [1, 0, 0]))
-    malla.apply_scale(altura_mm / malla.extents[2])
-    minimo = malla.bounds[0]
-    centro = malla.bounds.mean(axis=0)
-    malla.apply_translation([-centro[0], -centro[1], -minimo[2]])
+    giro = trimesh.transformations.rotation_matrix(np.pi / 2, [1, 0, 0])
+    v = trimesh.transform_points(malla.vertices, giro)
+    escala = altura_mm / np.ptp(v[:, 2])
+    v = v * escala
+    centro = (v.min(axis=0) + v.max(axis=0)) / 2
+    traslacion = trimesh.transformations.translation_matrix([-centro[0], -centro[1], -v[:, 2].min()])
+    transformacion = traslacion @ np.diag([escala, escala, escala, 1.0]) @ giro
+    malla.apply_transform(transformacion)
+    malla.metadata["transformacion"] = transformacion
     return malla
 
 
 def aplicar(malla: trimesh.Trimesh, acabado: str, altura_mm: float = 60,
             escala_mm: float | None = None, profundidad_mm: float | None = None,
             avisos: list | None = None) -> trimesh.Trimesh:
-    """Devuelve la malla lista para imprimir (mm, Z arriba) con el acabado."""
+    """Devuelve la malla lista para imprimir (mm, Z arriba) con el acabado.
+    En metadata quedan "transformacion" y "vertices_base" (antes del relieve)."""
     malla = a_impresion(malla, altura_mm)
+    transformacion = malla.metadata["transformacion"]
     if acabado in (None, "", "ninguno"):
+        malla.metadata["vertices_base"] = malla.vertices.copy()
         return malla
     funcion, escala_def, prof_def, _ = ACABADOS[acabado]
     escala = escala_mm or escala_def
@@ -176,9 +183,13 @@ def aplicar(malla: trimesh.Trimesh, acabado: str, altura_mm: float = 60,
     v, f = trimesh.remesh.subdivide_to_size(malla.vertices, malla.faces, max_edge=borde,
                                             max_iter=12)
     malla = trimesh.Trimesh(v, f, process=True)
+    base = malla.vertices.copy()
     normales = malla.vertex_normals
     altura = funcion(malla.vertices, normales, escala)
     malla.vertices = malla.vertices + normales * (altura * profundidad)[:, None]
     # Tras desplazar, se vuelve a apoyar en la cama.
     malla.apply_translation([0, 0, -malla.bounds[0][2]])
+    # Para pasar el color: posiciones antes del relieve y transformación del modelo.
+    malla.metadata["transformacion"] = transformacion
+    malla.metadata["vertices_base"] = base
     return malla
