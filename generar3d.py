@@ -132,14 +132,14 @@ def generar_forma(imagen: Image.Image, pasos: int = 5, resolucion: int = 256,
 
 def generar(imagen: Image.Image, salida: str, pasos: int = 5, resolucion: int = 256,
             semilla: int = 0, dispositivo: str = "auto", textura: bool = True,
-            fondo: str = "auto", **opciones_textura) -> str:
+            fondo: str = "auto", ajustar: bool = True, **opciones_textura) -> str:
     """Genera el modelo 3D de `imagen` y lo guarda en `salida` (.glb, .obj, .stl).
 
     Con `textura=True` también lo pinta (necesita GPU); `opciones_textura` se
     pasan a `textura.texturizar` (max_caras, resolucion_textura...).
     La imagen ya preparada se guarda junto a la salida como *_entrada.png.
     """
-    imagen, notas = preparar(imagen, fondo)
+    imagen, notas = preparar(imagen, fondo, ajustar)
     for nota in notas:
         print(nota)
     imagen.save(os.path.splitext(salida)[0] + "_entrada.png")
@@ -174,8 +174,10 @@ def main():
     p.add_argument("--semilla", type=int, default=0)
     p.add_argument("--dispositivo", default="auto", choices=["auto", "cuda", "cpu"])
     p.add_argument("--fondo", default="auto", choices=["auto", "ia", "blanco", "mantener"],
-                   help="Cómo quitar el fondo: auto (decide solo), ia (fotos con fondo "
-                        "complejo), blanco (fondo liso claro) o mantener (no tocarlo)")
+                   help="Cómo quitar el fondo: auto (transparencia si la hay, si no IA), "
+                        "ia, blanco (relleno del fondo claro, sin IA) o mantener (no tocarlo)")
+    p.add_argument("--sin-ajustar", action="store_true",
+                   help="No recortar, centrar ni limpiar la imagen (solo quitar el fondo)")
 
     t = p.add_argument_group("textura")
     t.add_argument("--sin-textura", action="store_true", help="Solo la forma, sin color")
@@ -190,6 +192,7 @@ def main():
     inicio = time.time()
     generar(Image.open(args.imagen), args.salida, args.pasos, args.resolucion,
             args.semilla, args.dispositivo, textura=not args.sin_textura, fondo=args.fondo,
+            ajustar=not args.sin_ajustar,
             max_caras=args.max_caras, resolucion_textura=args.resolucion_textura,
             vram_baja=args.vram_baja)
     print(f"Listo: {args.salida} ({time.time() - inicio:.0f} s)")

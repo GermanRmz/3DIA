@@ -81,19 +81,19 @@ Opciones útiles:
 
 ### Preparación de la imagen
 
-Antes de generar, la imagen se analiza y se prepara sola:
+Antes de generar hay dos pasos independientes:
 
-- Corrige la rotación de las fotos de móvil y reduce las muy grandes.
-- Quita el fondo: respeta la transparencia si la hay; con fondo claro y liso usa
-  relleno desde los bordes más IA para los huecos encerrados (por ejemplo entre
-  un brazo y el cuerpo); con fondos complejos usa IA (`rembg`, se descargan
-  ~180 MB la primera vez).
-- Quita manchas sueltas, recorta alrededor del objeto y avisa si está cortado
-  por el borde o si es muy pequeño.
-- Guarda lo que recibe el modelo como `<salida>_entrada.png` para revisarlo.
+- **Quitar el fondo** (`--fondo`): por defecto respeta la transparencia si la
+  imagen la trae y, si no, usa IA (BiRefNet vía `rembg`, ~220 MB la primera vez,
+  unos segundos por imagen). Distingue partes blancas del objeto (una cara) de un
+  fondo blanco. `--fondo blanco` usa relleno por color sin IA y `--fondo mantener`
+  no lo toca.
+- **Ajustar la imagen** (se desactiva con `--sin-ajustar`): corrige la rotación de
+  fotos de móvil, reduce las muy grandes, limpia manchas, recorta y centra, y
+  avisa si el objeto está cortado o es muy pequeño.
 
-Con `--fondo ia|blanco|mantener` se fuerza un método. Consejos: un solo objeto,
-completo, bien iluminado y lo más grande posible en la foto.
+Lo que recibe el modelo se guarda como `<salida>_entrada.png`. Consejos: un solo
+objeto, completo, bien iluminado y lo más grande posible en la imagen.
 
 ## Licencia y créditos
 

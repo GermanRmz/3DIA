@@ -1,14 +1,22 @@
 """Análisis y preparación de la imagen antes de generar el 3D.
 
-1. Corrige la rotación de las fotos de móvil (EXIF) y reduce las enormes.
-2. Quita el fondo:
-   - si la imagen ya trae transparencia, la respeta;
-   - si el fondo es claro y uniforme, usa relleno por inundación desde los
-     bordes (bordes precisos) y la IA para los huecos de fondo encerrados;
-   - si no, usa un modelo de IA de segmentación (rembg, isnet-general-use).
-3. Limpia la máscara: quita manchas sueltas.
-4. Recorta alrededor del objeto con margen y lo deja cuadrado.
-5. Avisa de problemas: objeto cortado por el borde, objeto muy pequeño...
+Son dos pasos independientes (cada uno se puede desactivar):
+
+Quitar el fondo (`fondo`):
+  - "auto": respeta la transparencia si la imagen ya la trae; si no, usa IA.
+  - "ia": modelo de segmentación BiRefNet (rembg, "birefnet-general-lite"). A
+    diferencia de los métodos por color, distingue partes blancas del objeto
+    (una cara, una barriga) de un fondo blanco, y el fondo encerrado entre
+    brazo y cuerpo.
+  - "blanco": relleno por inundación del fondo claro desde los bordes (rápido,
+    sin IA; no quita el fondo encerrado por el objeto).
+  - "mantener": no se toca.
+
+Ajustar la imagen (`ajustar`):
+  - Corrige la rotación de fotos de móvil (EXIF) y reduce las muy grandes.
+  - Quita manchas sueltas de la máscara y la semitransparencia del interior.
+  - Recorta alrededor del objeto con margen y lo deja cuadrado.
+  - Avisa si el objeto está cortado por el borde o es muy pequeño.
 """
 import cv2
 import numpy as np
@@ -16,9 +24,18 @@ from PIL import Image, ImageOps
 
 LADO_MAXIMO = 1536      # las fotos más grandes se reducen (los modelos usan ~512)
 LADO_MINIMO_OBJETO = 300
-MODELO_IA = "isnet-general-use"
+MODELO_IA = "birefnet-general-lite"
 
 _sesion_ia = None
+
+
+def _fondo_por_ia(imagen: Image.Image) -> np.ndarray:
+    global _sesion_ia
+    from rembg import new_session, remove
+
+    if _sesion_ia is None:
+        _sesion_ia = new_session(MODELO_IA)  # la primera vez descarga ~220 MB
+    return np.array(remove(imagen.convert("RGB"), session=_sesion_ia, only_mask=True))
 
 
 def _fondo_por_inundacion(rgb: np.ndarray, umbral: int = 235) -> np.ndarray:
@@ -35,30 +52,16 @@ def _fondo_por_inundacion(rgb: np.ndarray, umbral: int = 235) -> np.ndarray:
     return cv2.GaussianBlur(alfa, (3, 3), 0)
 
 
-def _fondo_por_ia(imagen: Image.Image) -> np.ndarray:
-    global _sesion_ia
-    from rembg import new_session, remove
-
-    if _sesion_ia is None:
-        _sesion_ia = new_session(MODELO_IA)  # la primera vez descarga ~180 MB
-    return np.array(remove(imagen.convert("RGB"), session=_sesion_ia, only_mask=True))
-
-
-def _fondo_claro_uniforme(rgb: np.ndarray) -> bool:
-    borde = np.concatenate([rgb[:3].reshape(-1, 3), rgb[-3:].reshape(-1, 3),
-                            rgb[:, :3].reshape(-1, 3), rgb[:, -3:].reshape(-1, 3)])
-    return (borde.min(axis=1) > 235).mean() > 0.9
-
-
 def _limpiar(alfa: np.ndarray) -> np.ndarray:
-    """Quita manchas sueltas: componentes de menos del 2 % del mayor."""
+    """Quita manchas sueltas (componentes de menos del 2 % del mayor) y deja
+    opaco el interior del objeto; solo el contorno conserva su suavizado."""
     n, etiquetas, stats, _ = cv2.connectedComponentsWithStats((alfa > 127).astype(np.uint8), 8)
-    if n <= 2:
-        return alfa
-    areas = stats[1:, cv2.CC_STAT_AREA]
-    pequenas = np.nonzero(areas < 0.02 * areas.max())[0] + 1
     alfa = alfa.copy()
-    alfa[np.isin(etiquetas, pequenas)] = 0
+    if n > 2:
+        areas = stats[1:, cv2.CC_STAT_AREA]
+        alfa[np.isin(etiquetas, np.nonzero(areas < 0.02 * areas.max())[0] + 1)] = 0
+    interior = cv2.erode((alfa > 127).astype(np.uint8), np.ones((7, 7), np.uint8))
+    alfa[interior > 0] = 255
     return alfa
 
 
@@ -73,57 +76,44 @@ def _recortar_cuadrado(rgba: np.ndarray, margen: float = 0.12) -> np.ndarray:
     return salida
 
 
-def preparar(imagen: Image.Image, fondo: str = "auto") -> tuple[Image.Image, list[str]]:
-    """Devuelve (imagen RGBA lista para el modelo, lista de avisos/notas).
-
-    fondo: "auto", "ia" (siempre IA), "blanco" (relleno por inundación) o
-    "mantener" (usar la imagen tal cual, con su transparencia si la tiene).
-    """
-    notas = []
-    imagen = ImageOps.exif_transpose(imagen)
-    if max(imagen.size) > LADO_MAXIMO:
-        imagen.thumbnail((LADO_MAXIMO, LADO_MAXIMO), Image.LANCZOS)
-
+def quitar_fondo(imagen: Image.Image, fondo: str = "auto") -> tuple[np.ndarray, str]:
+    """Devuelve (alfa uint8, nota) según el método elegido."""
     rgba = np.array(imagen.convert("RGBA"))
-    rgb = np.ascontiguousarray(rgba[:, :, :3])
     trae_alfa = imagen.mode in ("RGBA", "LA", "P") and rgba[:, :, 3].min() < 250
-
     if fondo == "mantener" or (fondo == "auto" and trae_alfa):
-        alfa = rgba[:, :, 3]
-        notas.append("Fondo: se usa la transparencia de la imagen.")
-    elif fondo == "blanco" or (fondo == "auto" and _fondo_claro_uniforme(rgb)):
-        alfa = _fondo_por_inundacion(rgb)
-        if fondo == "auto":
-            # El relleno no llega al fondo encerrado por el objeto (p. ej. entre
-            # un brazo y el cuerpo). Lo que la IA ve como fondo y además es
-            # blanco se quita; lo blanco que la IA ve como objeto se conserva.
-            ia = _fondo_por_ia(imagen)
-            claro = rgb.min(axis=2) > 235
-            alfa = np.where((ia < 128) & claro & (alfa > 127), 0, alfa).astype(np.uint8)
-        objeto = (alfa > 127).mean()
-        if fondo == "auto" and not 0.01 < objeto < 0.98:
-            alfa = _fondo_por_ia(imagen)
-            notas.append("Fondo: el relleno del fondo claro falló; se quitó con IA.")
-        else:
-            notas.append("Fondo: claro y uniforme, quitado por relleno.")
-    else:
-        alfa = _fondo_por_ia(imagen)
-        notas.append("Fondo: complejo, quitado con IA.")
+        return rgba[:, :, 3], "Fondo: se usa la transparencia de la imagen (o no se toca)."
+    if fondo == "blanco":
+        return _fondo_por_inundacion(np.ascontiguousarray(rgba[:, :, :3])), \
+            "Fondo: claro, quitado por relleno desde los bordes."
+    return _fondo_por_ia(imagen), "Fondo: quitado con IA."
 
-    alfa = _limpiar(alfa)
-    objeto = (alfa > 127).mean()
-    if objeto < 0.005:
+
+def preparar(imagen: Image.Image, fondo: str = "auto",
+             ajustar: bool = True) -> tuple[Image.Image, list[str]]:
+    """Devuelve (imagen RGBA lista para el modelo, lista de notas y avisos)."""
+    if ajustar:
+        imagen = ImageOps.exif_transpose(imagen)
+        if max(imagen.size) > LADO_MAXIMO:
+            imagen.thumbnail((LADO_MAXIMO, LADO_MAXIMO), Image.LANCZOS)
+
+    alfa, nota = quitar_fondo(imagen, fondo)
+    notas = [nota]
+    if ajustar:
+        alfa = _limpiar(alfa)
+    if (alfa > 127).mean() < 0.005:
         raise RuntimeError("No se encontró ningún objeto en la imagen. Usa una foto con un solo "
                            "objeto bien visible.")
+    rgba = np.dstack([np.array(imagen.convert("RGB")), alfa])
+    if not ajustar:
+        return Image.fromarray(rgba, "RGBA"), notas
 
     bordes = np.concatenate([alfa[0], alfa[-1], alfa[:, 0], alfa[:, -1]])
     if (bordes > 127).mean() > 0.03:
         notas.append("Aviso: el objeto toca el borde de la foto (¿está cortado?). "
                      "El 3D sale mejor si se ve completo.")
-
-    resultado = _recortar_cuadrado(np.dstack([rgb, alfa]))
+    resultado = _recortar_cuadrado(rgba)
     lado_objeto = int(resultado.shape[0] / 1.24)
     if lado_objeto < LADO_MINIMO_OBJETO:
-        notas.append(f"Aviso: el objeto mide solo ~{lado_objeto} px; con una foto de más "
+        notas.append(f"Aviso: el objeto mide solo ~{lado_objeto} px; con una imagen de más "
                      "resolución saldrán más detalles.")
     return Image.fromarray(resultado, "RGBA"), notas
