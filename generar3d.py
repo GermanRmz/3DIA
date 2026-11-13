@@ -15,6 +15,7 @@ import torch
 from PIL import Image
 
 _pipeline = None
+_vae_normal = None  # decodificador original, por si FlashVDM falla
 
 
 def quitar_fondo(imagen: Image.Image, umbral: int = 235) -> Image.Image:
@@ -48,7 +49,7 @@ def elegir_dispositivo(dispositivo: str = "auto") -> str:
 
 def cargar_pipeline(dispositivo: str = "auto"):
     """Carga el modelo una sola vez (la primera vez descarga ~4 GB)."""
-    global _pipeline
+    global _pipeline, _vae_normal
     if _pipeline is None:
         from hy3dgen.shapegen import Hunyuan3DDiTFlowMatchingPipeline
 
@@ -71,6 +72,7 @@ def cargar_pipeline(dispositivo: str = "auto"):
             # la red cerca de la superficie. Es el paso que más tardaba.
             from hy3dgen.shapegen.models import ShapeVAE
 
+            _vae_normal = _pipeline.vae
             _pipeline.vae = ShapeVAE.from_pretrained(
                 carpeta, subfolder=modelos.VAE_RAPIDO, use_safetensors=True,
                 variant="fp16", device=dispositivo, dtype=torch.float16)
@@ -87,14 +89,28 @@ def generar_forma(imagen: Image.Image, pasos: int = 5, resolucion: int = 256,
     if str(pipeline.device).startswith("cuda"):
         vram_gb = torch.cuda.get_device_properties(0).total_memory / 1024 ** 3
         trozos = 200000 if vram_gb >= 12 else 80000
-    return pipeline(
-        image=imagen,
-        num_inference_steps=pasos,
-        octree_resolution=resolucion,
-        num_chunks=trozos,
-        generator=torch.manual_seed(semilla),
-        output_type="trimesh",
-    )[0]
+    def ejecutar():
+        return pipeline(
+            image=imagen,
+            num_inference_steps=pasos,
+            octree_resolution=resolucion,
+            num_chunks=trozos,
+            generator=torch.manual_seed(semilla),
+            output_type="trimesh",
+        )[0]
+
+    global _vae_normal
+    malla = ejecutar()
+    if malla is None and _vae_normal is not None:
+        print("FlashVDM no encontró superficie; se repite con el decodificador normal "
+              "(más lento) y se usará ese a partir de ahora.")
+        pipeline.vae, _vae_normal = _vae_normal, None
+        torch.cuda.empty_cache()
+        malla = ejecutar()
+    if malla is None:
+        raise RuntimeError("El modelo no generó ninguna superficie. Prueba otra imagen "
+                           "(un objeto centrado sobre fondo liso) u otra --semilla.")
+    return malla
 
 
 def generar(imagen: Image.Image, salida: str, pasos: int = 5, resolucion: int = 256,
@@ -106,6 +122,13 @@ def generar(imagen: Image.Image, salida: str, pasos: int = 5, resolucion: int = 
     pasan a `textura.texturizar` (max_caras, resolucion_textura, pasos_vistas...).
     """
     imagen = quitar_fondo(imagen)
+    objeto = (np.array(imagen)[:, :, 3] > 127).mean()
+    print(f"Objeto: {objeto:.0%} de la imagen")
+    if objeto < 0.01:
+        raise RuntimeError("Al quitar el fondo no quedó casi nada del objeto. Usa una imagen "
+                           "con fondo transparente o un fondo que contraste con la figura.")
+    if objeto > 0.98:
+        print("Aviso: no se detectó fondo. El resultado es mejor con fondo blanco o transparente.")
     if textura:
         from textura import comprobar_dependencias
         comprobar_dependencias()  # falla antes de gastar tiempo en la forma
