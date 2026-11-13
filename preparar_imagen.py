@@ -34,7 +34,14 @@ def _fondo_por_ia(imagen: Image.Image) -> np.ndarray:
     from rembg import new_session, remove
 
     if _sesion_ia is None:
-        _sesion_ia = new_session(MODELO_IA)  # la primera vez descarga ~220 MB
+        import onnxruntime as ort
+
+        # Sin "arena" de memoria: la RAM usada al segmentar se libera al terminar
+        # en vez de quedarse reservada (el pico ronda los 7 GB).
+        opciones = ort.SessionOptions()
+        opciones.enable_cpu_mem_arena = False
+        opciones.enable_mem_pattern = False
+        _sesion_ia = new_session(MODELO_IA, sess_opts=opciones)  # la primera vez descarga ~220 MB
     return np.array(remove(imagen.convert("RGB"), session=_sesion_ia, only_mask=True))
 
 
