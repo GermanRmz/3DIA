@@ -1,21 +1,24 @@
 # 3DIA: imagen a 3D
 
 Convierte una imagen (por ejemplo, la foto de una figura) en un modelo 3D `.glb`
-usando el modelo abierto [Hunyuan3D-2](https://github.com/Tencent-Hunyuan/Hunyuan3D-2).
+con forma y color (textura), usando el modelo abierto [Hunyuan3D-2](https://github.com/Tencent-Hunyuan/Hunyuan3D-2).
 
 Incluye:
 
 - `generar3d.py`: línea de comandos, imagen -> modelo 3D.
 - `app.py`: app web para subir la imagen, ver el modelo y descargarlo.
-
-Por ahora genera solo la **forma** (sin color/textura).
+- `textura.py`: pinta la malla con Hunyuan3D-Paint (turbo).
+- `relleno_uv.py`: relleno rápido de los huecos de la textura.
 
 ## Requisitos
 
 - Python 3.10 a 3.12 y Git.
-- GPU NVIDIA con 6 GB de VRAM o más (recomendado). En CPU funciona, pero
-  una generación tarda decenas de minutos.
-- Unos 10 GB de disco para los pesos, que se descargan solos la primera vez.
+- GPU NVIDIA. Solo forma: 6 GB de VRAM. Forma + textura: 12 GB o más
+  (con menos de 16 GB los modelos se mueven a CPU cuando no se usan).
+  En CPU solo se puede generar la forma, y tarda decenas de minutos.
+- Unos 20 GB de disco para los pesos, que se descargan solos la primera vez.
+- Para la textura: [CUDA Toolkit 12.4](https://developer.nvidia.com/cuda-12-4-0-download-archive)
+  y, en Windows, Visual Studio Build Tools con "Desarrollo para el escritorio con C++".
 
 ## Instalación
 
@@ -33,6 +36,18 @@ pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
 pip install -r requirements.txt
 ```
 
+### Textura (una sola vez)
+
+El texturizado usa un rasterizador CUDA que hay que compilar. En Windows hazlo
+desde "x64 Native Tools Command Prompt for VS 2022" con el entorno activado:
+
+```bash
+pip install --no-build-isolation "git+https://github.com/Tencent-Hunyuan/Hunyuan3D-2#subdirectory=hy3dgen/texgen/custom_rasterizer"
+```
+
+Comprueba que quedó bien con `python -c "import custom_rasterizer"`.
+Si no lo instalas, puedes seguir generando solo la forma con `--sin-textura`.
+
 ## Uso
 
 App web (abre http://localhost:7860):
@@ -47,8 +62,24 @@ Línea de comandos:
 python generar3d.py figura.png -o figura.glb
 ```
 
-Opciones útiles: `--resolucion 192` (más rápido, menos detalle), `--semilla 1`
-(otra variante), `--dispositivo cpu`.
+Opciones útiles:
+
+- `--sin-textura`: solo la forma (funciona también en CPU con `--dispositivo cpu`).
+- `--resolucion 192`: forma más rápida, menos detalle.
+- `--semilla 1`: otra variante.
+- `--resolucion-textura 1024`: textura más rápida y con menos VRAM.
+- `--pasos-textura 30`: más calidad de color (por defecto 15).
+- `--max-caras 20000`: menos caras al pintar, más rápido.
+- `--vram-baja`: fuerza a mover modelos a la CPU si te quedas sin memoria.
+
+## Velocidad
+
+- Forma: decodificador FlashVDM (solo evalúa cerca de la superficie) y trozos
+  grandes en GPU.
+- Textura: modelo de pintura turbo, menos pasos de difusión, malla reducida antes
+  de desplegar UVs y relleno de huecos vectorizado (~5x más rápido que el original).
+- Los modelos se cargan una sola vez: en la app web la primera generación es la
+  más lenta.
 
 Consejos para la imagen: un solo objeto, centrado, fondo blanco o transparente.
 
