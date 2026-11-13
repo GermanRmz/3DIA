@@ -38,12 +38,24 @@ pip install -r requirements.txt
 
 ### Textura (una sola vez)
 
-El texturizado usa un rasterizador CUDA que hay que compilar. En Windows hazlo
-desde "x64 Native Tools Command Prompt for VS 2022" con el entorno activado:
+El texturizado usa un rasterizador CUDA que hay que compilar.
 
-```bash
+1. Mira qué CUDA usa tu PyTorch: `python -c "import torch; print(torch.version.cuda)"`
+   (por ejemplo `12.4`) e instala el **CUDA Toolkit** de esa misma versión.
+2. En Windows abre "x64 Native Tools Command Prompt for VS 2022", entra en la
+   carpeta del proyecto, activa el entorno (`venv\Scripts\activate`) y ejecuta
+   (cambia `v12.4` por tu versión):
+
+```bat
+set CUDA_HOME=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4
+set PATH=%CUDA_HOME%\bin;%PATH%
+set DISTUTILS_USE_SDK=1
 pip install --no-build-isolation "git+https://github.com/Tencent-Hunyuan/Hunyuan3D-2#subdirectory=hy3dgen/texgen/custom_rasterizer"
 ```
+
+En Linux basta con `export CUDA_HOME=/usr/local/cuda` y el `pip install` de arriba.
+Si sale "unsupported Microsoft Visual Studio version", añade antes
+`set NVCC_APPEND_FLAGS=-allow-unsupported-compiler`.
 
 Comprueba que quedó bien con `python -c "import custom_rasterizer"`.
 Si no lo instalas, puedes seguir generando solo la forma con `--sin-textura`.
