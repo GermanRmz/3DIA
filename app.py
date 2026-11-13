@@ -87,7 +87,7 @@ with gr.Blocks(title="Imagen a 3D") as demo:
                 pasos = gr.Slider(1, 30, value=5, step=1, label="Pasos")
                 resolucion = gr.Slider(128, 384, value=256, step=32, label="Resolución de la malla")
                 semilla = gr.Number(value=0, precision=0, label="Semilla")
-                intentos = gr.Slider(1, 6, value=3, step=1,
+                intentos = gr.Slider(1, 10, value=6, step=1,
                                      label="Intentos si el modelo sale plano (otras semillas)")
             with gr.Accordion("Opciones de textura", open=False):
                 resolucion_textura = gr.Radio([1024, 2048], value=2048, label="Resolución de la textura")

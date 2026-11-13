@@ -59,16 +59,32 @@ def cargar_pipeline(dispositivo: str = "auto"):
                 # El codificador de imagen (2.3 GB) solo sube a la GPU para codificar.
                 _pipeline.conditioner.to("cpu")
                 _codificador_bajo_demanda(_pipeline)
-            # Los decodificadores van en fp32: en fp16 algunas GPUs (p. ej. RTX 20xx)
-            # pierden la superficie de ciertas imágenes y el modelo sale plano.
-            # El normal (solo de reserva) espera en la CPU si la GPU es pequeña.
-            _vae_normal = _pipeline.vae.to("cpu" if _gpu_pequena else dispositivo, torch.float32)
+            # El decodificador normal (de reserva y para las pruebas rápidas de
+            # grosor) espera en la CPU si la GPU es pequeña.
+            _vae_normal = _pipeline.vae.to("cpu" if _gpu_pequena else dispositivo)
             torch.cuda.empty_cache()
             _pipeline.vae = ShapeVAE.from_pretrained(
                 carpeta, subfolder=modelos.VAE_RAPIDO, use_safetensors=True,
-                variant="fp16", device=dispositivo, dtype=torch.float32)
+                variant="fp16", device=dispositivo, dtype=torch.float16)
             _pipeline.enable_flashvdm(topk_mode="merge", replace_vae=False)
+        _cachear_codificacion(_pipeline)
     return _pipeline
+
+
+def _cachear_codificacion(pipeline):
+    """Los intentos con otras semillas usan la misma imagen: se codifica una vez."""
+    original = pipeline.encode_cond
+    cache = {}
+
+    def encode_cond(image, *args, **kwargs):
+        import hashlib
+        clave = hashlib.sha1(image.detach().cpu().numpy().tobytes()).hexdigest()
+        if clave not in cache:
+            cache.clear()
+            cache[clave] = original(image, *args, **kwargs)
+        return cache[clave]
+
+    pipeline.encode_cond = encode_cond
 
 
 def _codificador_bajo_demanda(pipeline):
@@ -123,53 +139,78 @@ def grosor(malla) -> float:
     return float(lados.min() / max(lados.max(), 1e-9))
 
 
-def _una_forma(pipeline, imagen, pasos, resolucion, semilla, trozos):
+def _latentes(pipeline, imagen, pasos, semilla, trozos):
     latentes = pipeline(
         image=imagen,
         num_inference_steps=pasos,
-        octree_resolution=resolucion,
         num_chunks=trozos,
         generator=torch.manual_seed(semilla),
         output_type="latent",
+        enable_pbar=False,
     )
     if not torch.isfinite(latentes).all():
         raise RuntimeError("La difusión dio valores inválidos (NaN). Prueba con --dispositivo cpu "
                            "para comprobar si es un problema de la GPU.")
+    return latentes
 
-    def decodificar():
-        tipo = next(pipeline.vae.parameters()).dtype
-        return pipeline._export(latentes.to(tipo), "trimesh", octree_resolution=resolucion,
-                                num_chunks=trozos)[0]
 
-    if _vae_normal is None:
-        return decodificar()
-    # FlashVDM falla con algunas imágenes (no ve la superficie en su malla
-    # gruesa); en ese caso esta imagen se decodifica con el método normal.
+def _exportar(pipeline, vae, latentes, resolucion, trozos):
+    anterior, pipeline.vae = pipeline.vae, vae
     try:
-        malla = decodificar()
-    except (RuntimeError, IndexError):
-        malla = None
-    if malla is None:
-        print("FlashVDM no encontró la superficie; se usa el decodificador normal "
-              "para esta imagen (más lento).")
-        vae_rapido, pipeline.vae = pipeline.vae, _vae_normal.to(pipeline.device)
+        tipo = next(vae.parameters()).dtype
+        return pipeline._export(latentes.to(tipo), "trimesh", octree_resolution=resolucion,
+                                num_chunks=trozos, enable_pbar=False)[0]
+    finally:
+        pipeline.vae = anterior
+
+
+def _vae_de_reserva(pipeline):
+    """Decodificador normal (sin FlashVDM), en la GPU si hace falta."""
+    if _vae_normal is None:
+        return pipeline.vae
+    return _vae_normal.to(pipeline.device)
+
+
+def _guardar_reserva():
+    if _gpu_pequena and _vae_normal is not None:
+        _vae_normal.to("cpu")
         torch.cuda.empty_cache()
+
+
+def _grosor_rapido(pipeline, latentes, trozos) -> float:
+    """Grosor de una decodificación de muy baja resolución (unos segundos).
+    Una lámina plana puede ni aparecer a esta resolución: cuenta como grosor 0."""
+    try:
+        malla = _exportar(pipeline, _vae_de_reserva(pipeline), latentes, 64, trozos)
+    except (RuntimeError, IndexError):
+        return 0.0
+    return 0.0 if malla is None else grosor(malla)
+
+
+def _decodificar(pipeline, latentes, resolucion, trozos):
+    """Decodificación completa: FlashVDM y, si no ve la superficie, la normal."""
+    if _vae_normal is not None:
         try:
-            malla = decodificar()
-        finally:
-            pipeline.vae = vae_rapido
-            if _gpu_pequena:
-                _vae_normal.to("cpu")
-                torch.cuda.empty_cache()
-    return malla
+            malla = _exportar(pipeline, pipeline.vae, latentes, resolucion, trozos)
+        except (RuntimeError, IndexError):
+            malla = None
+        if malla is not None:
+            return malla
+        print("FlashVDM no encontró la superficie; se usa el decodificador normal (más lento).")
+    try:
+        return _exportar(pipeline, _vae_de_reserva(pipeline), latentes, resolucion, trozos)
+    finally:
+        _guardar_reserva()
 
 
 def generar_forma(imagen: Image.Image, pasos: int = 5, resolucion: int = 256,
-                  semilla: int = 0, dispositivo: str = "auto", intentos: int = 3):
+                  semilla: int = 0, dispositivo: str = "auto", intentos: int = 6):
     """Devuelve la malla (trimesh) generada a partir de una imagen sin fondo.
 
-    Si sale plana (como un recorte de cartón), prueba hasta `intentos` semillas
-    y se queda con la más gruesa: la difusión solo tarda unos segundos.
+    Con dibujos 2D el modelo a veces decide que el objeto es un recorte plano
+    (una lámina), según la semilla. Por eso se prueban hasta `intentos`
+    semillas midiendo el grosor con una decodificación rápida de baja
+    resolución, y solo la elegida se decodifica con calidad.
     """
     pipeline = cargar_pipeline(dispositivo)
     # En GPU, trozos grandes = menos llamadas a la red, pero más VRAM.
@@ -179,26 +220,29 @@ def generar_forma(imagen: Image.Image, pasos: int = 5, resolucion: int = 256,
         trozos = 200000 if vram_gb >= 12 else 60000 if vram_gb >= 8 else 20000
 
     mejor, mejor_grosor = None, -1.0
-    for intento in range(max(intentos, 1)):
-        malla = _una_forma(pipeline, imagen, pasos, resolucion, semilla + intento, trozos)
-        if malla is None:
-            continue
-        g = grosor(malla)
-        if g > mejor_grosor:
-            mejor, mejor_grosor = malla, g
-        if g >= GROSOR_MINIMO:
-            break
-        if intento + 1 < intentos:
-            print(f"El modelo salió plano (grosor {g:.0%}); se prueba la semilla {semilla + intento + 1}.")
-    if mejor is None:
+    try:
+        for intento in range(max(intentos, 1)):
+            s = semilla + intento
+            latentes = _latentes(pipeline, imagen, pasos, s, trozos)
+            g = _grosor_rapido(pipeline, latentes, trozos) if intentos > 1 else 1.0
+            if intentos > 1:
+                print(f"Semilla {s}: grosor {g:.0%}" + ("" if g >= GROSOR_MINIMO else " (plano)"))
+            if g > mejor_grosor:
+                mejor, mejor_grosor = latentes, g
+            if g >= GROSOR_MINIMO:
+                break
+    finally:
+        _guardar_reserva()
+    if mejor_grosor < GROSOR_MINIMO:
+        print(f"Aviso: en {intentos} intentos el modelo salió plano (grosor {mejor_grosor:.0%}). "
+              "Prueba con más --intentos u otra --semilla; una imagen con sombras o en vista 3/4 "
+              "da más volumen.")
+    malla = _decodificar(pipeline, mejor, resolucion, trozos)
+    if malla is None:
         raise RuntimeError("El modelo no generó ninguna superficie. Prueba otra imagen "
                            "(un objeto centrado sobre fondo liso) u otra --semilla.")
-    if mejor_grosor < GROSOR_MINIMO:
-        print(f"Aviso: el modelo sigue siendo plano (grosor {mejor_grosor:.0%}). Suele pasar con "
-              "dibujos 2D de colores planos; una imagen con sombras o en vista 3/4 da más volumen.")
-    else:
-        print(f"Grosor del modelo: {mejor_grosor:.0%}")
-    return mejor
+    print(f"Grosor del modelo: {grosor(malla):.0%}")
+    return malla
 
 
 def ruta_impresion(salida: str) -> str:
@@ -211,7 +255,7 @@ def ruta_color(salida: str, extension: str) -> str:
 
 def generar(imagen: Image.Image, salida: str, pasos: int = 5, resolucion: int = 256,
             semilla: int = 0, dispositivo: str = "auto", textura: bool = True,
-            fondo: str = "auto", ajustar: bool = True, intentos: int = 3,
+            fondo: str = "auto", ajustar: bool = True, intentos: int = 6,
             acabado: str | None = None, colores: int = 1,
             altura_mm: float = 60, escala_acabado: float | None = None,
             profundidad_acabado: float | None = None, **opciones_textura) -> str:
@@ -281,7 +325,7 @@ def main():
     p.add_argument("--resolucion", type=int, default=256,
                    help="Resolución de la malla; en CPU usa 128-192 para que no tarde tanto")
     p.add_argument("--semilla", type=int, default=0)
-    p.add_argument("--intentos", type=int, default=3,
+    p.add_argument("--intentos", type=int, default=6,
                    help="Si el modelo sale plano, cuántas semillas probar (1 = no reintentar)")
     p.add_argument("--dispositivo", default="auto", choices=["auto", "cuda", "cpu"])
     p.add_argument("--fondo", default="auto", choices=["auto", "ia", "blanco", "mantener"],

@@ -113,10 +113,14 @@ python generar3d.py gato.jpg -o gato.glb --acabado tejido --colores 4
 
 ### Modelos planos
 
-Si el modelo sale plano (lado menor menos del 25 % del mayor, como un recorte de
-cartón), se prueban automáticamente otras semillas (`--intentos`, 3 por defecto)
-y se queda el más grueso. Los dibujos 2D de colores planos tienden a salir así;
-una imagen con sombras o en vista 3/4 da más volumen.
+Con dibujos 2D de frente, el modelo a veces decide que el objeto es un recorte
+plano (una lámina de grosor casi cero); depende de la semilla. Por eso se prueban
+hasta 6 semillas (`--intentos`): cada una se decodifica a muy baja resolución
+para medir el grosor en unos segundos, y solo la primera con volumen se decodifica
+con calidad. La imagen se codifica una sola vez para todos los intentos.
+
+`python diagnostico.py imagen.png` genera y mide la forma de varias maneras en tu
+GPU, por si hay que investigar más.
 
 ## Velocidad
 
