@@ -106,6 +106,11 @@ def exportar_3mf(ruta: str, malla: trimesh.Trimesh, etiquetas: np.ndarray, palet
         f'<object id="1" type="model" pid="2" pindex="0"><mesh><vertices>{vertices}</vertices>'
         f'<triangles>{triangulos}</triangles></mesh></object></resources>'
         '<build><item objectid="1"/></build></model>')
+    escribir_paquete_3mf(ruta, modelo)
+
+
+def escribir_paquete_3mf(ruta: str, modelo: str):
+    """Empaqueta el XML del modelo como archivo .3mf."""
     tipos = ('<?xml version="1.0" encoding="UTF-8"?>\n'
              '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
              '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
@@ -136,6 +141,8 @@ def pintar_impresion(malla_impresion: trimesh.Trimesh, malla_textura: trimesh.Tr
     centros = base[malla_impresion.faces].mean(axis=1)
     etiquetas, paleta = cuantizar(colores_en_puntos(textura, centros), n_colores)
     exportar_3mf(ruta_3mf, malla_impresion, etiquetas, paleta)
+    malla_impresion.metadata["etiquetas_color"] = etiquetas
+    malla_impresion.metadata["paleta"] = paleta
     if ruta_vista:
         vista = trimesh.Trimesh(malla_impresion.vertices, malla_impresion.faces, process=False)
         vista.visual.face_colors = np.column_stack([paleta[etiquetas], np.full(len(etiquetas), 255)])

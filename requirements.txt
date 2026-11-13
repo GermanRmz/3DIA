@@ -9,3 +9,5 @@ gradio
 # Para compilar el rasterizador de la textura (ver README)
 ninja
 pybind11
+# Cortes y uniones de la segmentación
+manifold3d

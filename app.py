@@ -4,19 +4,22 @@ Uso:
     python app.py
 y abre http://localhost:7860
 """
+import os
 import tempfile
 import time
 
 import gradio as gr
 
 import acabados
-from generar3d import generar, ruta_color, ruta_impresion
+import segmentar
+from generar3d import generar, ruta_color, ruta_impresion, ruta_partes
 from preparar_imagen import preparar
 
 
 def convertir(imagen, fondo, ajustar, pasos, resolucion, semilla, con_textura, resolucion_textura,
               max_caras, con_stl, acabado, altura_mm, escala, profundidad, colores, intentos,
-              progreso=gr.Progress(track_tqdm=True)):
+              seg_modo, seg_partes, seg_volumen, seg_cortes, seg_union, seg_diametro, seg_largo,
+              seg_holgura, seg_iman_d, seg_iman_h, progreso=gr.Progress(track_tqdm=True)):
     """Genera paso a paso y va mostrando el avance en la página."""
     if imagen is None:
         raise gr.Error("Sube una imagen primero.")
@@ -27,14 +30,29 @@ def convertir(imagen, fondo, ajustar, pasos, resolucion, semilla, con_textura, r
         preparada, notas = preparar(imagen, FONDOS[fondo], ajustar)
         estado = "\n".join(f"- {n}" for n in notas)
         pasos_txt = "forma y textura (unos minutos)" if con_textura else "forma"
-        yield preparada, None, None, None, None, estado + f"\n\n**Generando {pasos_txt}...**"
+        yield preparada, None, None, None, None, None, estado + f"\n\n**Generando {pasos_txt}...**"
+
+        segmentacion = None
+        modo = MODOS_UI[seg_modo]
+        if con_stl and modo != "no":
+            try:
+                volumen = tuple(float(v) for v in seg_volumen.lower().replace(" ", "").split("x"))
+                assert len(volumen) == 3
+            except (ValueError, AssertionError):
+                raise gr.Error("Volumen de impresión no válido. Ejemplo: 220x220x250")
+            segmentacion = {"modo": modo, "partes": int(seg_partes), "volumen": volumen,
+                            "manual": seg_cortes,
+                            "union": segmentar.OpcionesUnion(UNIONES_UI[seg_union], float(seg_diametro),
+                                                             float(seg_largo), float(seg_holgura),
+                                                             float(seg_iman_d), float(seg_iman_h))}
 
         generar(preparada, salida, int(pasos), int(resolucion), int(semilla),
                 textura=con_textura, fondo="mantener", ajustar=False, intentos=int(intentos),
                 colores=int(colores), acabado=ACABADOS_UI[acabado] if con_stl else None, altura_mm=float(altura_mm),
                 escala_acabado=float(escala), profundidad_acabado=float(profundidad),
+                segmentacion=segmentacion,
                 resolucion_textura=int(resolucion_textura), max_caras=int(max_caras))
-    except RuntimeError as e:
+    except (RuntimeError, ValueError) as e:
         raise gr.Error(str(e))
     descargas, vista = None, None
     if con_stl:
@@ -43,8 +61,22 @@ def convertir(imagen, fondo, ajustar, pasos, resolucion, semilla, con_textura, r
         if con_textura and int(colores) > 1:
             descargas.append(ruta_color(salida, ".3mf"))
             vista = ruta_color(salida, ".glb")
-    yield (preparada, salida, salida, vista, descargas,
+    vista_partes = None
+    if segmentacion and os.path.exists(ruta_partes(salida, ".zip")):
+        descargas += [ruta_partes(salida, ".zip"), ruta_partes(salida, ".3mf")]
+        vista_partes = ruta_partes(salida, ".glb")
+    yield (preparada, salida, salida, vista, descargas, vista_partes,
            estado + f"\n\n**Listo en {time.time() - inicio:.0f} s.**")
+
+
+def visibilidad_segmentacion(modo, union):
+    m, u = MODOS_UI[modo], UNIONES_UI[union]
+    activo = m != "no"
+    return (gr.update(visible=m in ("horizontal", "vertical_x", "vertical_y")),
+            gr.update(visible=m == "cama"), gr.update(visible=m == "manual"),
+            gr.update(visible=activo),
+            gr.update(visible=activo and u in ("espiga", "pasadores")),
+            gr.update(visible=activo and u == "imanes"))
 
 
 def valores_acabado(nombre):
@@ -55,6 +87,9 @@ def valores_acabado(nombre):
     _, escala, profundidad, _ = acabados.ACABADOS[clave]
     return gr.update(value=escala, interactive=True), gr.update(value=profundidad, interactive=True)
 
+
+MODOS_UI = {"No dividir": "no", **{v: k for k, v in segmentar.MODOS.items()}}
+UNIONES_UI = {v: k for k, v in segmentar.UNIONES.items()}
 
 ACABADOS_UI = {"Sin acabado (liso)": "ninguno",
                **{f"{k.capitalize()}: {v[3].lower()}": k for k, v in acabados.ACABADOS.items()}}
@@ -82,6 +117,23 @@ with gr.Blocks(title="Imagen a 3D") as demo:
                 with gr.Row():
                     escala = gr.Number(value=2.5, label="Tamaño del patrón (mm)", interactive=False)
                     profundidad = gr.Number(value=0.5, label="Profundidad (mm)", interactive=False)
+            with gr.Accordion("Dividir en partes (piezas grandes)", open=False):
+                seg_modo = gr.Dropdown(list(MODOS_UI), value="No dividir", label="Cómo dividir")
+                seg_partes = gr.Slider(2, 8, value=2, step=1, label="Número de partes", visible=False)
+                seg_volumen = gr.Textbox(value="220x220x250", label="Volumen de tu impresora (mm, AnchoxFondoxAlto)",
+                                         visible=False)
+                seg_cortes = gr.Textbox(value="z=30", label="Cortes (mm): eje=posición separados por comas",
+                                        visible=False)
+                with gr.Group(visible=False) as grupo_union:
+                    seg_union = gr.Radio(list(UNIONES_UI), value=segmentar.UNIONES["espiga"],
+                                         label="Tipo de unión")
+                    with gr.Row(visible=True) as fila_espiga:
+                        seg_diametro = gr.Number(value=5.0, label="Diámetro (mm)")
+                        seg_largo = gr.Number(value=8.0, label="Largo (mm)")
+                        seg_holgura = gr.Number(value=0.2, label="Holgura (mm)")
+                    with gr.Row(visible=False) as fila_iman:
+                        seg_iman_d = gr.Number(value=6.0, label="Diámetro del imán (mm)")
+                        seg_iman_h = gr.Number(value=3.0, label="Alto del imán (mm)")
             boton = gr.Button("Generar 3D", variant="primary")
             with gr.Accordion("Opciones de forma", open=False):
                 pasos = gr.Slider(1, 30, value=5, step=1, label="Pasos")
@@ -99,14 +151,20 @@ with gr.Blocks(title="Imagen a 3D") as demo:
             visor = gr.Model3D(label="Modelo 3D")
             archivo = gr.File(label="Descargar .glb (con color)")
             visor_stl = gr.Model3D(label="Modelo para imprimir (mm, con acabado y colores)")
-            archivo_stl = gr.File(label="Descargar para imprimir (.stl, .3mf a color)",
+            visor_partes = gr.Model3D(label="Partes (vista separada)")
+            archivo_stl = gr.File(label="Descargar para imprimir (.stl, .3mf, partes .zip)",
                                   file_count="multiple")
     boton.click(convertir,
                 [entrada, fondo, ajustar, pasos, resolucion, semilla, con_textura, resolucion_textura,
-                 max_caras, con_stl, acabado, altura_mm, escala, profundidad, colores, intentos],
-                [preparada, visor, archivo, visor_stl, archivo_stl, estado],
+                 max_caras, con_stl, acabado, altura_mm, escala, profundidad, colores, intentos,
+                 seg_modo, seg_partes, seg_volumen, seg_cortes, seg_union, seg_diametro, seg_largo,
+                 seg_holgura, seg_iman_d, seg_iman_h],
+                [preparada, visor, archivo, visor_stl, archivo_stl, visor_partes, estado],
                 show_progress_on=[visor])
     acabado.change(valores_acabado, acabado, [escala, profundidad])
+    for control in (seg_modo, seg_union):
+        control.change(visibilidad_segmentacion, [seg_modo, seg_union],
+                       [seg_partes, seg_volumen, seg_cortes, grupo_union, fila_espiga, fila_iman])
 
 if __name__ == "__main__":
     demo.queue().launch()

@@ -258,7 +258,8 @@ def generar(imagen: Image.Image, salida: str, pasos: int = 5, resolucion: int = 
             fondo: str = "auto", ajustar: bool = True, intentos: int = 6,
             acabado: str | None = None, colores: int = 1,
             altura_mm: float = 60, escala_acabado: float | None = None,
-            profundidad_acabado: float | None = None, **opciones_textura) -> str:
+            profundidad_acabado: float | None = None, segmentacion: dict | None = None,
+            **opciones_textura) -> str:
     """Genera el modelo 3D de `imagen` y lo guarda en `salida` (.glb, .obj, .stl).
 
     Con `acabado` (un nombre de acabados.ACABADOS o "ninguno") también guarda
@@ -268,6 +269,10 @@ def generar(imagen: Image.Image, salida: str, pasos: int = 5, resolucion: int = 
 
     Con `textura=True` también lo pinta (necesita GPU); `opciones_textura` se
     pasan a `textura.texturizar` (max_caras, resolucion_textura...).
+    Con `segmentacion` (dict con modo, partes, volumen, manual y union, ver
+    segmentar.py) también divide la pieza de impresión: *_partes.zip (un STL por
+    parte), *_partes.3mf (todas colocadas, pintadas si hay colores) y una vista
+    previa *_partes.glb.
     La imagen ya preparada se guarda junto a la salida como *_entrada.png.
     """
     imagen, notas = preparar(imagen, fondo, ajustar)
@@ -313,8 +318,40 @@ def generar(imagen: Image.Image, salida: str, pasos: int = 5, resolucion: int = 
             lista = ", ".join(f"{i + 1}: #{r:02X}{g:02X}{b:02X}" for i, (r, g, b) in enumerate(paleta))
             print(f"Multicolor: {ruta_color(salida, '.3mf')} ({time.time() - t:.1f} s). "
                   f"Filamentos -> {lista}")
+    if acabado is not None and segmentacion and segmentacion.get("modo") not in (None, "", "no"):
+        dividir(impresion, salida, segmentacion)
     malla.export(salida)
     return salida
+
+
+def ruta_partes(salida: str, extension: str) -> str:
+    return os.path.splitext(salida)[0] + "_partes" + extension
+
+
+def dividir(impresion, salida: str, opciones: dict):
+    """Divide la pieza de impresión en partes con uniones y guarda los archivos."""
+    import segmentar
+
+    t = time.time()
+    cortes = segmentar.planificar(impresion, opciones["modo"], opciones.get("partes", 2),
+                                  opciones.get("volumen", (220, 220, 250)),
+                                  opciones.get("manual", ""))
+    if not cortes:
+        print("Segmentación: la pieza ya cabe entera; no hace falta dividirla.")
+        return
+    res = segmentar.segmentar(impresion, cortes, opciones.get("union"))
+    for aviso in res.avisos:
+        print(aviso)
+    etiquetas, paleta = None, impresion.metadata.get("paleta")
+    if paleta is not None:
+        etiquetas = segmentar.colores_de_partes(res, impresion, impresion.metadata["etiquetas_color"])
+    segmentar.exportar_zip(ruta_partes(salida, ".zip"), res)
+    segmentar.exportar_3mf(ruta_partes(salida, ".3mf"), res, etiquetas, paleta)
+    segmentar.vista_explosionada(res.partes, ruta_partes(salida, ".glb"))
+    tam = ", ".join("x".join(f"{d:.0f}" for d in p.extents) for p in res.partes)
+    print(f"Segmentación: {len(res.partes)} partes ({tam} mm)"
+          + (f" + {len(res.pasadores)} pasadores" if res.pasadores else "")
+          + f" -> {ruta_partes(salida, '.zip')} ({time.time() - t:.1f} s)")
 
 
 def main():
@@ -353,7 +390,33 @@ def main():
     i.add_argument("--altura-mm", type=float, default=60, help="Altura de la pieza impresa (mm)")
     i.add_argument("--escala-acabado", type=float, help="Tamaño del patrón en mm")
     i.add_argument("--profundidad-acabado", type=float, help="Profundidad del relieve en mm")
+    import segmentar
+    d = p.add_argument_group("dividir en partes (genera <salida>_partes.zip/.3mf; necesita --acabado)")
+    d.add_argument("--segmentar", choices=list(segmentar.MODOS),
+                   help="; ".join(f"{k}: {v.lower()}" for k, v in segmentar.MODOS.items()))
+    d.add_argument("--partes", type=int, default=2, help="Partes para horizontal/vertical")
+    d.add_argument("--volumen", default="220x220x250",
+                   help="Volumen de impresión AnchoxFondoxAlto en mm (modo cama)")
+    d.add_argument("--cortes", default="", help='Cortes manuales, p. ej. "z=30, x=0"')
+    d.add_argument("--union", default="espiga", choices=list(segmentar.UNIONES),
+                   help="; ".join(f"{k}: {v.lower()}" for k, v in segmentar.UNIONES.items()))
+    d.add_argument("--diametro-union", type=float, default=5.0, help="Diámetro de espiga/pasador (mm)")
+    d.add_argument("--largo-union", type=float, default=8.0, help="Largo de espiga/pasador (mm)")
+    d.add_argument("--holgura", type=float, default=0.2, help="Juego para que encaje (mm)")
+    d.add_argument("--iman", default="6x3", help="Imán DiámetroxAlto en mm")
     args = p.parse_args()
+
+    segmentacion = None
+    if args.segmentar:
+        if args.acabado is None:
+            args.acabado = "ninguno"
+        im_d, im_h = (float(v) for v in args.iman.lower().split("x"))
+        segmentacion = {
+            "modo": args.segmentar, "partes": args.partes, "manual": args.cortes,
+            "volumen": tuple(float(v) for v in args.volumen.lower().split("x")),
+            "union": segmentar.OpcionesUnion(args.union, args.diametro_union, args.largo_union,
+                                             args.holgura, im_d, im_h),
+        }
 
     inicio = time.time()
     generar(Image.open(args.imagen), args.salida, args.pasos, args.resolucion,
@@ -361,6 +424,7 @@ def main():
             ajustar=not args.sin_ajustar, intentos=args.intentos, acabado=args.acabado,
             colores=args.colores, altura_mm=args.altura_mm,
             escala_acabado=args.escala_acabado, profundidad_acabado=args.profundidad_acabado,
+            segmentacion=segmentacion,
             max_caras=args.max_caras, resolucion_textura=args.resolucion_textura,
             vram_baja=args.vram_baja)
     print(f"Listo: {args.salida} ({time.time() - inicio:.0f} s)")
