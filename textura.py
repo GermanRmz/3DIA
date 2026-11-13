@@ -18,11 +18,21 @@ el rasterizador en PyTorch puro de rasterizador.py (mismo resultado).
 import contextlib
 import os
 import sys
+import warnings
 
 import torch
 
 import modelos
 from relleno_uv import rellenar_textura
+
+# Avisos inofensivos de diffusers/hy3dgen (modelos en RAM con offload, programa
+# de pasos del modelo turbo, torch.range) que solo confunden.
+warnings.filterwarnings("ignore", message="torch.range is deprecated")
+try:
+    from diffusers.utils import logging as _registro_diffusers
+    _registro_diffusers.set_verbosity_error()
+except ImportError:
+    pass
 
 _pintor = None
 _config_pintor = None
