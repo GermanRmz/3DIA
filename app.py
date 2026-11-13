@@ -11,15 +11,16 @@ import time
 import gradio as gr
 
 import acabados
+import personaje
 import segmentar
-from generar3d import generar, ruta_color, ruta_impresion, ruta_partes
+from dividir import dividir_modelo
+from generar3d import generar, ruta_color, ruta_impresion
 from preparar_imagen import preparar
 
 
 def convertir(imagen, fondo, ajustar, pasos, resolucion, semilla, con_textura, resolucion_textura,
               max_caras, con_stl, acabado, altura_mm, escala, profundidad, colores, intentos,
-              seg_modo, seg_partes, seg_volumen, seg_cortes, seg_union, seg_diametro, seg_largo,
-              seg_holgura, seg_iman_d, seg_iman_h, progreso=gr.Progress(track_tqdm=True)):
+              progreso=gr.Progress(track_tqdm=True)):
     """Genera paso a paso y va mostrando el avance en la página."""
     if imagen is None:
         raise gr.Error("Sube una imagen primero.")
@@ -32,25 +33,10 @@ def convertir(imagen, fondo, ajustar, pasos, resolucion, semilla, con_textura, r
         pasos_txt = "forma y textura (unos minutos)" if con_textura else "forma"
         yield preparada, None, None, None, None, None, estado + f"\n\n**Generando {pasos_txt}...**"
 
-        segmentacion = None
-        modo = MODOS_UI[seg_modo]
-        if con_stl and modo != "no":
-            try:
-                volumen = tuple(float(v) for v in seg_volumen.lower().replace(" ", "").split("x"))
-                assert len(volumen) == 3
-            except (ValueError, AssertionError):
-                raise gr.Error("Volumen de impresión no válido. Ejemplo: 220x220x250")
-            segmentacion = {"modo": modo, "partes": int(seg_partes), "volumen": volumen,
-                            "manual": seg_cortes,
-                            "union": segmentar.OpcionesUnion(UNIONES_UI[seg_union], float(seg_diametro),
-                                                             float(seg_largo), float(seg_holgura),
-                                                             float(seg_iman_d), float(seg_iman_h))}
-
         generar(preparada, salida, int(pasos), int(resolucion), int(semilla),
                 textura=con_textura, fondo="mantener", ajustar=False, intentos=int(intentos),
                 colores=int(colores), acabado=ACABADOS_UI[acabado] if con_stl else None, altura_mm=float(altura_mm),
                 escala_acabado=float(escala), profundidad_acabado=float(profundidad),
-                segmentacion=segmentacion,
                 resolucion_textura=int(resolucion_textura), max_caras=int(max_caras))
     except (RuntimeError, ValueError) as e:
         raise gr.Error(str(e))
@@ -61,22 +47,35 @@ def convertir(imagen, fondo, ajustar, pasos, resolucion, semilla, con_textura, r
         if con_textura and int(colores) > 1:
             descargas.append(ruta_color(salida, ".3mf"))
             vista = ruta_color(salida, ".glb")
-    vista_partes = None
-    if segmentacion and os.path.exists(ruta_partes(salida, ".zip")):
-        descargas += [ruta_partes(salida, ".zip"), ruta_partes(salida, ".3mf")]
-        vista_partes = ruta_partes(salida, ".glb")
-    yield (preparada, salida, salida, vista, descargas, vista_partes,
-           estado + f"\n\n**Listo en {time.time() - inicio:.0f} s.**")
+    # El .glb con color sirve después en la pestaña "Dividir modelo".
+    yield (preparada, salida, salida, vista, descargas, salida,
+           estado + f"\n\n**Listo en {time.time() - inicio:.0f} s.** Para imprimirlo por piezas, "
+                    "usa la pestaña *Dividir modelo*.")
 
 
-def visibilidad_segmentacion(modo, union):
-    m, u = MODOS_UI[modo], UNIONES_UI[union]
-    activo = m != "no"
-    return (gr.update(visible=m in ("horizontal", "vertical_x", "vertical_y")),
-            gr.update(visible=m == "cama"), gr.update(visible=m == "manual"),
-            gr.update(visible=activo),
-            gr.update(visible=activo and u in ("espiga", "pasadores")),
-            gr.update(visible=activo and u == "imanes"))
+def dividir_app(archivo, ultimo, tipo, plantilla, cortes, union_p, union_c, diametro, holgura,
+                altura, colores):
+    ruta = archivo or ultimo
+    if not ruta:
+        raise gr.Error("Sube un modelo o genera uno en la pestaña Generar.")
+    base = tempfile.NamedTemporaryFile(suffix="", delete=False).name
+    es_personaje = tipo == TIPOS[0]
+    try:
+        rutas, informe = dividir_modelo(
+            ruta, PLANTILLAS_UI[plantilla] if es_personaje else None, cortes,
+            UNIONES_PERSONAJE[union_p] if es_personaje else segmentar_uniones[union_c],
+            float(diametro or 0), float(holgura), float(altura) or None, int(colores),
+            salida_base=base)
+    except (RuntimeError, ValueError) as e:
+        raise gr.Error(str(e))
+    texto = "\n".join(f"- {linea}" for linea in informe.splitlines())
+    return texto, rutas["vista"], [rutas["zip"], rutas["3mf"]]
+
+
+def visibilidad_division(tipo):
+    personaje_ = tipo == TIPOS[0]
+    return (gr.update(visible=personaje_), gr.update(visible=personaje_),
+            gr.update(visible=not personaje_), gr.update(visible=not personaje_))
 
 
 def valores_acabado(nombre):
@@ -88,8 +87,11 @@ def valores_acabado(nombre):
     return gr.update(value=escala, interactive=True), gr.update(value=profundidad, interactive=True)
 
 
-MODOS_UI = {"No dividir": "no", **{v: k for k, v in segmentar.MODOS.items()}}
-UNIONES_UI = {v: k for k, v in segmentar.UNIONES.items()}
+TIPOS = ["Personaje (cabeza, torso, brazos, piernas)", "Cortes planos"]
+PLANTILLAS_UI = {v[0]: k for k, v in personaje.PLANTILLAS.items()}
+UNIONES_PERSONAJE = {v: k for k, v in personaje.UNIONES.items()}
+segmentar_uniones = {v: k for k, v in segmentar.UNIONES.items()}
+PLANTILLAS_IMG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "plantillas.png")
 
 ACABADOS_UI = {"Sin acabado (liso)": "ninguno",
                **{f"{k.capitalize()}: {v[3].lower()}": k for k, v in acabados.ACABADOS.items()}}
@@ -100,7 +102,8 @@ FONDOS = {"Automático": "auto", "IA": "ia", "Fondo blanco (sin IA)": "blanco",
 with gr.Blocks(title="Imagen a 3D") as demo:
     gr.Markdown("# Imagen a 3D\nSube una foto de un objeto y genera su modelo 3D con color y un STL listo para imprimir. "
                 "Funciona con [Hunyuan3D-2](https://github.com/Tencent-Hunyuan/Hunyuan3D-2).")
-    with gr.Row():
+    ultimo = gr.State(None)
+    with gr.Tab("Generar"), gr.Row():
         with gr.Column():
             entrada = gr.Image(type="pil", image_mode="RGBA", label="Imagen")
             fondo = gr.Radio(list(FONDOS), value="Automático", label="Quitar el fondo")
@@ -117,23 +120,6 @@ with gr.Blocks(title="Imagen a 3D") as demo:
                 with gr.Row():
                     escala = gr.Number(value=2.5, label="Tamaño del patrón (mm)", interactive=False)
                     profundidad = gr.Number(value=0.5, label="Profundidad (mm)", interactive=False)
-            with gr.Accordion("Dividir en partes (piezas grandes)", open=False):
-                seg_modo = gr.Dropdown(list(MODOS_UI), value="No dividir", label="Cómo dividir")
-                seg_partes = gr.Slider(2, 8, value=2, step=1, label="Número de partes", visible=False)
-                seg_volumen = gr.Textbox(value="220x220x250", label="Volumen de tu impresora (mm, AnchoxFondoxAlto)",
-                                         visible=False)
-                seg_cortes = gr.Textbox(value="z=30", label="Cortes (mm): eje=posición separados por comas",
-                                        visible=False)
-                with gr.Group(visible=False) as grupo_union:
-                    seg_union = gr.Radio(list(UNIONES_UI), value=segmentar.UNIONES["espiga"],
-                                         label="Tipo de unión")
-                    with gr.Row(visible=True) as fila_espiga:
-                        seg_diametro = gr.Number(value=5.0, label="Diámetro (mm)")
-                        seg_largo = gr.Number(value=8.0, label="Largo (mm)")
-                        seg_holgura = gr.Number(value=0.2, label="Holgura (mm)")
-                    with gr.Row(visible=False) as fila_iman:
-                        seg_iman_d = gr.Number(value=6.0, label="Diámetro del imán (mm)")
-                        seg_iman_h = gr.Number(value=3.0, label="Alto del imán (mm)")
             boton = gr.Button("Generar 3D", variant="primary")
             with gr.Accordion("Opciones de forma", open=False):
                 pasos = gr.Slider(1, 30, value=5, step=1, label="Pasos")
@@ -151,20 +137,50 @@ with gr.Blocks(title="Imagen a 3D") as demo:
             visor = gr.Model3D(label="Modelo 3D")
             archivo = gr.File(label="Descargar .glb (con color)")
             visor_stl = gr.Model3D(label="Modelo para imprimir (mm, con acabado y colores)")
-            visor_partes = gr.Model3D(label="Partes (vista separada)")
-            archivo_stl = gr.File(label="Descargar para imprimir (.stl, .3mf, partes .zip)",
+            archivo_stl = gr.File(label="Descargar para imprimir (.stl, .3mf a color)",
                                   file_count="multiple")
     boton.click(convertir,
                 [entrada, fondo, ajustar, pasos, resolucion, semilla, con_textura, resolucion_textura,
-                 max_caras, con_stl, acabado, altura_mm, escala, profundidad, colores, intentos,
-                 seg_modo, seg_partes, seg_volumen, seg_cortes, seg_union, seg_diametro, seg_largo,
-                 seg_holgura, seg_iman_d, seg_iman_h],
-                [preparada, visor, archivo, visor_stl, archivo_stl, visor_partes, estado],
+                 max_caras, con_stl, acabado, altura_mm, escala, profundidad, colores, intentos],
+                [preparada, visor, archivo, visor_stl, archivo_stl, ultimo, estado],
                 show_progress_on=[visor])
     acabado.change(valores_acabado, acabado, [escala, profundidad])
-    for control in (seg_modo, seg_union):
-        control.change(visibilidad_segmentacion, [seg_modo, seg_union],
-                       [seg_partes, seg_volumen, seg_cortes, grupo_union, fila_espiga, fila_iman])
+
+    with gr.Tab("Dividir modelo"), gr.Row():
+        with gr.Column():
+            modelo = gr.File(label="Modelo (.glb de esta app, .stl, .obj). Si lo dejas vacío se usa "
+                                   "el último generado", file_types=[".glb", ".gltf", ".stl", ".obj", ".ply"],
+                             type="filepath")
+            tipo = gr.Radio(TIPOS, value=TIPOS[0], label="Tipo de división")
+            imagen_plantillas = gr.Image(PLANTILLAS_IMG, show_label=False, interactive=False,
+                                         height=150)
+            plantilla = gr.Radio(list(PLANTILLAS_UI), value=list(PLANTILLAS_UI)[0], label="Plantilla",
+                                 info="El personaje debe estar de pie, de frente y con los brazos "
+                                      "separados del cuerpo para poder separarlos.")
+            cortes = gr.Textbox(value="z=40", label="Cortes (mm): eje=posición separados por comas",
+                                visible=False)
+            union_p = gr.Radio(list(UNIONES_PERSONAJE), value=list(UNIONES_PERSONAJE)[0],
+                               label="Unión")
+            union_c = gr.Radio(list(segmentar_uniones), value=segmentar.UNIONES["espiga"], label="Unión",
+                               visible=False)
+            with gr.Row():
+                diametro = gr.Number(value=0, label="Diámetro de la unión (mm, 0 = automático)")
+                holgura = gr.Number(value=0.2, label="Holgura (mm)")
+            with gr.Row():
+                altura = gr.Number(value=0, label="Altura de la figura (mm, 0 = la del modelo; "
+                                                  "un .glb se escala a 60)")
+                colores_d = gr.Slider(1, 8, value=1, step=1, label="Colores (necesita .glb con textura)")
+            boton_dividir = gr.Button("Dividir", variant="primary")
+        with gr.Column():
+            informe = gr.Markdown()
+            vista = gr.Model3D(label="Partes (vista separada)")
+            archivos = gr.File(label="Descargar partes (.zip con un STL por parte, .3mf colocado)",
+                               file_count="multiple")
+    tipo.change(visibilidad_division, tipo, [imagen_plantillas, plantilla, cortes, union_c])
+    tipo.change(lambda t: gr.update(visible=t == TIPOS[0]), tipo, union_p)
+    boton_dividir.click(dividir_app, [modelo, ultimo, tipo, plantilla, cortes, union_p, union_c,
+                                      diametro, holgura, altura, colores_d],
+                        [informe, vista, archivos])
 
 if __name__ == "__main__":
     demo.queue().launch()

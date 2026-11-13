@@ -53,6 +53,7 @@ class Resultado:
     partes: list = field(default_factory=list)       # trimesh por parte
     pasadores: list = field(default_factory=list)    # trimesh por pasador
     avisos: list = field(default_factory=list)
+    nombres: list = field(default_factory=list)      # opcional: nombre de cada parte
 
 
 # --- Conversión -------------------------------------------------------------------
@@ -68,9 +69,11 @@ def _a_manifold(malla: trimesh.Trimesh):
 
 
 def _a_trimesh(m) -> trimesh.Trimesh:
-    mesh = m.to_mesh()
+    mesh = m.simplify(1e-3).to_mesh()  # quita triángulos sin área que dejan los cortes
+    # Sin "process": la salida de manifold ya comparte vértices y es cerrada;
+    # fusionar vértices cercanos puede romperla (caras degeneradas de los cortes).
     return trimesh.Trimesh(np.asarray(mesh.vert_properties)[:, :3], np.asarray(mesh.tri_verts),
-                           process=True)
+                           process=False)
 
 
 def _marco(eje: str):
@@ -279,7 +282,9 @@ def exportar_zip(ruta: str, res: Resultado):
     """ZIP con un STL por parte y por pasador, listos para el laminador."""
     with zipfile.ZipFile(ruta, "w", zipfile.ZIP_DEFLATED) as z:
         for i, p in enumerate(colocar_en_cama(res.partes), 1):
-            z.writestr(f"parte_{i}.stl", p.export(file_type="stl"))
+            nombre = res.nombres[i - 1] if len(res.nombres) >= i else f"parte {i}"
+            archivo = re.sub(r"[^a-z0-9]+", "_", nombre.lower()).strip("_")
+            z.writestr(f"{i:02d}_{archivo}.stl", p.export(file_type="stl"))
         if res.pasadores:
             z.writestr(f"pasadores_x{len(res.pasadores)}.stl",
                        trimesh.util.concatenate(colocar_en_cama(res.pasadores, 4.0)).export(file_type="stl"))
@@ -301,7 +306,8 @@ def exportar_3mf(ruta: str, res: Resultado, etiquetas_partes: list | None = None
     from multicolor import _codigo_pintura, escribir_paquete_3mf
 
     objetos = colocar_en_cama(res.partes + res.pasadores)
-    nombres = [f"Parte {i}" for i in range(1, len(res.partes) + 1)] + \
+    nombres = [res.nombres[i - 1] if len(res.nombres) >= i else f"Parte {i}"
+               for i in range(1, len(res.partes) + 1)] + \
               [f"Pasador {i}" for i in range(1, len(res.pasadores) + 1)]
     etiquetas = list(etiquetas_partes or []) + [None] * (len(objetos) - len(etiquetas_partes or []))
     recursos, items = [], []

@@ -14,7 +14,9 @@ Incluye:
 - `preparar_imagen.py`: analiza la imagen y quita el fondo antes de generar.
 - `acabados.py`: relieves de superficie para impresión 3D (tejido, moleteado...).
 - `multicolor.py`: 3MF pintado por filamentos para impresoras multicolor.
-- `segmentar.py`: divide la pieza en partes con uniones (espigas, pasadores, imanes).
+- `dividir.py`: divide un modelo ya generado en partes (personaje o cortes planos).
+- `personaje.py`: detecta cuello, hombros y entrepierna y separa cabeza, torso, brazos y piernas.
+- `segmentar.py`: cortes planos y uniones (espigas, pasadores, imanes).
 
 ## Requisitos
 
@@ -114,32 +116,37 @@ python generar3d.py gato.jpg -o gato.glb --acabado tejido --colores 4
 
 ### Dividir en partes
 
-Para piezas grandes, la pieza de impresión se corta en partes con uniones para
-pegarlas o encajarlas (sección "Dividir en partes" de la app, o `--segmentar`):
+Con un modelo ya generado, la pestaña **Dividir modelo** de la app (o `dividir.py`)
+lo separa en piezas para imprimirlas por separado y montarlas:
 
-| Modo | Qué hace |
-|---|---|
-| `horizontal` | `--partes N` capas de igual altura |
-| `vertical_x`, `vertical_y` | `--partes N` rodajas verticales |
-| `cama` | los cortes justos para que cada parte quepa en `--volumen 220x220x250` |
-| `manual` | `--cortes "z=30, x=0"` (mm) |
+![Plantillas](assets/plantillas.png)
+
+**Personaje** (de pie, de frente): detecta cuello, entrepierna y hombros
+analizando las secciones de la figura y corta según la plantilla (6, 5, 4, 3 o 2
+partes). Los brazos solo se pueden separar si cuelgan separados del cuerpo; si
+están pegados, se quedan en el torso y se avisa.
 
 | Unión | Qué hace |
 |---|---|
-| `espiga` | cilindro macho en una parte y agujero con holgura en la otra |
-| `pasadores` | agujeros en ambas partes y pasadores sueltos para imprimir |
-| `imanes` | alojamientos para imanes redondos (`--iman 6x3`) |
+| `espiga` | pin en la pieza (cabeza, brazo, pierna) y agujero con holgura en el torso |
+| `bola` | rótula: bola con cuello en la pieza y alojamiento a presión en el torso (figura articulada) |
 | `ninguna` | corte plano para pegar |
 
-Las uniones se colocan solas dentro de cada sección (dos si caben, para que no
-giren; más pequeñas o ninguna si no caben). Se ajustan con `--diametro-union`,
-`--largo-union` y `--holgura` (0.2 mm por defecto; súbela si no entran).
-Salen `<salida>_partes.zip` (un STL por parte y los pasadores), `<salida>_partes.3mf`
-(todas colocadas en la cama y, con `--colores`, pintadas) y una vista separada.
+**Cortes planos**: `--cortes "z=40, x=0"` (mm) con uniones `espiga`, `pasadores`,
+`imanes` o `ninguna`.
 
 ```bash
-python generar3d.py dragon.jpg -o dragon.glb --altura-mm 300 --segmentar cama --volumen 220x220x250 --union espiga
+python dividir.py figura.glb --plantilla 6 --union bola --altura-mm 150 --colores 4
 ```
+
+```bash
+python dividir.py figura_impresion.stl --cortes "z=60" --union imanes
+```
+
+Salen `<modelo>_partes.zip` (un STL por pieza con su nombre), `<modelo>_partes.3mf`
+(todas colocadas en la cama; con un `.glb` con textura y `--colores`, pintadas) y
+una vista separada `.glb`. El diámetro de la unión es automático (`--diametro`
+para fijarlo) y la holgura 0.2 mm (`--holgura`; súbela si no encaja).
 
 ### Modelos planos
 
