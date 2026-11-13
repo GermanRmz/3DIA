@@ -11,6 +11,7 @@ Incluye:
 - `relleno_uv.py`: relleno rápido de los huecos de la textura.
 - `rasterizador.py`: rasterizador en PyTorch (sustituye al módulo CUDA compilado).
 - `modelos.py`: descarga de pesos con reintentos.
+- `preparar_imagen.py`: analiza la imagen y quita el fondo antes de generar.
 
 ## Requisitos
 
@@ -78,7 +79,21 @@ Opciones útiles:
 - Los modelos se cargan una sola vez: en la app web la primera generación es la
   más lenta.
 
-Consejos para la imagen: un solo objeto, centrado, fondo blanco o transparente.
+### Preparación de la imagen
+
+Antes de generar, la imagen se analiza y se prepara sola:
+
+- Corrige la rotación de las fotos de móvil y reduce las muy grandes.
+- Quita el fondo: respeta la transparencia si la hay; con fondo claro y liso usa
+  relleno desde los bordes más IA para los huecos encerrados (por ejemplo entre
+  un brazo y el cuerpo); con fondos complejos usa IA (`rembg`, se descargan
+  ~180 MB la primera vez).
+- Quita manchas sueltas, recorta alrededor del objeto y avisa si está cortado
+  por el borde o si es muy pequeño.
+- Guarda lo que recibe el modelo como `<salida>_entrada.png` para revisarlo.
+
+Con `--fondo ia|blanco|mantener` se fuerza un método. Consejos: un solo objeto,
+completo, bien iluminado y lo más grande posible en la foto.
 
 ## Licencia y créditos
 

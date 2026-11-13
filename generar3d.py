@@ -5,40 +5,18 @@ Uso:
     python generar3d.py foto.png -o modelo.glb --sin-textura
 """
 import argparse
+import os
 import time
 
 import modelos  # noqa: F401  (ajusta los timeouts de descarga antes de importar nada más)
 
-import cv2
-import numpy as np
 import torch
 from PIL import Image
 
+from preparar_imagen import preparar
+
 _pipeline = None
 _vae_normal = None  # decodificador original, por si FlashVDM falla
-
-
-def quitar_fondo(imagen: Image.Image, umbral: int = 235) -> Image.Image:
-    """Vuelve transparente el fondo claro conectado a los bordes.
-
-    Usa relleno por inundación desde los bordes, así los blancos del interior
-    (ojos, parches, etc.) se conservan. Si la imagen ya trae transparencia,
-    se devuelve tal cual.
-    """
-    if imagen.mode == "RGBA" and np.array(imagen)[:, :, 3].min() < 250:
-        return imagen
-    rgb = np.array(imagen.convert("RGB"))
-    alto, ancho = rgb.shape[:2]
-    fondo = (rgb.min(axis=2) > umbral).astype(np.uint8)
-    mascara = np.zeros((alto + 2, ancho + 2), np.uint8)
-    semillas = [(0, 0), (ancho - 1, 0), (0, alto - 1), (ancho - 1, alto - 1),
-                (ancho // 2, 0), (ancho // 2, alto - 1), (0, alto // 2), (ancho - 1, alto // 2)]
-    for x, y in semillas:
-        if fondo[y, x] == 1:
-            cv2.floodFill(fondo, mascara, (x, y), 2)
-    alfa = np.where(fondo == 2, 0, 255).astype(np.uint8)
-    alfa = cv2.GaussianBlur(alfa, (3, 3), 0)
-    return Image.fromarray(np.dstack([rgb, alfa]), "RGBA")
 
 
 def elegir_dispositivo(dispositivo: str = "auto") -> str:
@@ -144,20 +122,17 @@ def generar_forma(imagen: Image.Image, pasos: int = 5, resolucion: int = 256,
 
 def generar(imagen: Image.Image, salida: str, pasos: int = 5, resolucion: int = 256,
             semilla: int = 0, dispositivo: str = "auto", textura: bool = True,
-            **opciones_textura) -> str:
+            fondo: str = "auto", **opciones_textura) -> str:
     """Genera el modelo 3D de `imagen` y lo guarda en `salida` (.glb, .obj, .stl).
 
     Con `textura=True` también lo pinta (necesita GPU); `opciones_textura` se
     pasan a `textura.texturizar` (max_caras, resolucion_textura...).
+    La imagen ya preparada se guarda junto a la salida como *_entrada.png.
     """
-    imagen = quitar_fondo(imagen)
-    objeto = (np.array(imagen)[:, :, 3] > 127).mean()
-    print(f"Objeto: {objeto:.0%} de la imagen")
-    if objeto < 0.01:
-        raise RuntimeError("Al quitar el fondo no quedó casi nada del objeto. Usa una imagen "
-                           "con fondo transparente o un fondo que contraste con la figura.")
-    if objeto > 0.98:
-        print("Aviso: no se detectó fondo. El resultado es mejor con fondo blanco o transparente.")
+    imagen, notas = preparar(imagen, fondo)
+    for nota in notas:
+        print(nota)
+    imagen.save(os.path.splitext(salida)[0] + "_entrada.png")
     if textura:
         from textura import comprobar_dependencias
         comprobar_dependencias()  # falla antes de gastar tiempo en la forma
@@ -188,6 +163,9 @@ def main():
                    help="Resolución de la malla; en CPU usa 128-192 para que no tarde tanto")
     p.add_argument("--semilla", type=int, default=0)
     p.add_argument("--dispositivo", default="auto", choices=["auto", "cuda", "cpu"])
+    p.add_argument("--fondo", default="auto", choices=["auto", "ia", "blanco", "mantener"],
+                   help="Cómo quitar el fondo: auto (decide solo), ia (fotos con fondo "
+                        "complejo), blanco (fondo liso claro) o mantener (no tocarlo)")
 
     t = p.add_argument_group("textura")
     t.add_argument("--sin-textura", action="store_true", help="Solo la forma, sin color")
@@ -201,7 +179,7 @@ def main():
 
     inicio = time.time()
     generar(Image.open(args.imagen), args.salida, args.pasos, args.resolucion,
-            args.semilla, args.dispositivo, textura=not args.sin_textura,
+            args.semilla, args.dispositivo, textura=not args.sin_textura, fondo=args.fondo,
             max_caras=args.max_caras, resolucion_textura=args.resolucion_textura,
             vram_baja=args.vram_baja)
     print(f"Listo: {args.salida} ({time.time() - inicio:.0f} s)")
