@@ -165,6 +165,42 @@ Salen `<modelo>_partes.zip` (un STL por pieza con su nombre), `<modelo>_partes.3
 una vista separada `.glb`. El diámetro de la unión es automático (`--diametro`
 para fijarlo) y la holgura 0.2 mm (`--holgura`; súbela si no encaja).
 
+### Mecanismos (piezas que se mueven)
+
+La pestaña **Mecanismos** (o `mecanismo.py`) convierte un modelo en un juguete que
+funciona y en una animación, al estilo de PhysAg3D: una catapulta con ruedas que
+giran y un brazo que lanza, un cofre con tapa, una mandíbula...
+
+1. **Analizar con IA**: Claude mira tres vistas del modelo con cuadrícula en mm (y
+   la imagen original si la subes) y propone las piezas móviles: su caja, el
+   pivote, el eje y el tipo (*giro* para ruedas, *bisagra* para brazos y tapas).
+   Sale una vista previa con las cajas y un JSON que puedes corregir a mano.
+2. **Construir**: separa cada pieza y le pone su eje.
+   - *Montada*: se imprime ya ensamblada (print-in-place); el eje sale del cuerpo y
+     la pieza gira alrededor con holgura.
+   - *Separadas*: agujeros y pasadores sueltos (a presión en el cuerpo).
+   Si la pieza es fina se le añade un buje; si el pivote cae unos mm fuera, se
+   corrige; si la pieza está entre dos laterales, el eje los cruza de lado a lado.
+3. Descargas: `.glb` animado (Blender, visores web; las ruedas giran y el brazo
+   sube y vuelve), `.zip` con un STL por pieza y los pasadores, y `.3mf`.
+
+La IA necesita una clave de la API de Anthropic (cada análisis cuesta unos
+céntimos). Créala en https://console.anthropic.com y, antes de lanzar la app:
+
+```bash
+export ANTHROPIC_API_KEY="tu-clave"
+```
+
+Sin clave puedes escribir el JSON tú mismo y pulsar *Construir*. Desde la terminal:
+
+```bash
+python mecanismo.py catapulta.glb --imagen catapulta.png --modo montada
+python mecanismo.py catapulta.glb --piezas catapulta_piezas.json --modo separadas
+```
+
+Consejos: holgura 0.3 mm para print-in-place (0.4 si tu impresora es imprecisa) e
+imprime el modelo a 80 mm o más para que los ejes tengan grosor.
+
 ### Modelos planos
 
 Con dibujos 2D de frente, el modelo a veces decide que el objeto es un recorte

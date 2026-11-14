@@ -11,9 +11,10 @@ import time
 import gradio as gr
 
 import acabados
+import mecanismos
 import personaje
 import segmentar
-from dividir import dividir_modelo
+from dividir import cargar, dividir_modelo
 from generar3d import generar, ruta_color, ruta_impresion
 from preparar_imagen import preparar
 
@@ -79,6 +80,53 @@ def dividir_app(archivo, ultimo, tipo, plantilla, max_partes, cortes, union_p, u
     return texto, rutas["vista"], [rutas["zip"], rutas["3mf"]]
 
 
+def _modelo_mecanismo(archivo, ultimo, altura):
+    ruta = archivo
+    if not ruta and ultimo:
+        ruta = ruta_impresion(ultimo) if os.path.exists(ruta_impresion(ultimo)) else ultimo
+    if not ruta:
+        raise gr.Error("Sube un modelo o genera uno en la pestaña Generar.")
+    return cargar(ruta, float(altura) or None)[0]
+
+
+def analizar_app(archivo, ultimo, imagen, descripcion, altura):
+    malla = _modelo_mecanismo(archivo, ultimo, altura)
+    try:
+        piezas, resumen = mecanismos.analizar(malla, imagen, descripcion or "")
+    except Exception as e:  # sin clave, sin red, rechazo...
+        raise gr.Error(f"No se pudo analizar con la IA: {e}")
+    return mecanismos.a_json(piezas, resumen), mecanismos.vista_previa(malla, piezas), \
+        f"**IA:** {resumen}\n\nRevisa o corrige las piezas (JSON) y pulsa *Construir*."
+
+
+def vista_app(archivo, ultimo, texto, altura):
+    malla = _modelo_mecanismo(archivo, ultimo, altura)
+    try:
+        piezas = mecanismos.desde_json(texto or "{}")
+    except (ValueError, TypeError) as e:
+        raise gr.Error(f"JSON no válido: {e}")
+    return mecanismos.vista_previa(malla, piezas)
+
+
+def construir_app(archivo, ultimo, texto, modo, holgura, diametro, altura):
+    malla = _modelo_mecanismo(archivo, ultimo, altura)
+    try:
+        piezas = mecanismos.desde_json(texto or "{}")
+    except (ValueError, TypeError) as e:
+        raise gr.Error(f"JSON no válido: {e}")
+    if not piezas:
+        raise gr.Error("No hay piezas móviles: pulsa *Analizar con IA* o escríbelas en el JSON.")
+    clave = MODOS_MEC[modo]
+    try:
+        mec = mecanismos.construir(malla, piezas, clave, float(holgura), float(diametro or 0))
+    except (RuntimeError, ValueError) as e:
+        raise gr.Error(str(e))
+    base = tempfile.NamedTemporaryFile(suffix="", delete=False).name
+    rutas = mecanismos.exportar(mec, base, clave)
+    lineas = [f"- **{p.nombre}**: {p.tipo}" for p in mec.partes] + [f"- Aviso: {a}" for a in mec.avisos]
+    return "\n".join(lineas), rutas["glb"], [rutas["glb"], rutas["zip"], rutas["3mf"]]
+
+
 def visibilidad_division(tipo):
     personaje_, auto = tipo == TIPOS[0], tipo == TIPOS[1]
     return (gr.update(visible=personaje_), gr.update(visible=personaje_), gr.update(visible=auto),
@@ -119,6 +167,9 @@ PLANTILLAS_IMG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "asset
 
 ACABADOS_UI = {"Sin acabado (liso)": "ninguno",
                **{f"{k.capitalize()}: {v[3].lower()}": k for k, v in acabados.ACABADOS.items()}}
+
+MODOS_MEC = {"Montada (se imprime ya ensamblada, print-in-place)": "montada",
+             "Separadas (piezas y pasadores sueltos)": "separadas"}
 
 FONDOS = {"Automático": "auto", "IA": "ia", "Fondo blanco (sin IA)": "blanco",
           "No tocar": "mantener"}
@@ -208,6 +259,37 @@ with gr.Blocks(title="Imagen a 3D") as demo:
     boton_dividir.click(dividir_app, [modelo, ultimo, tipo, plantilla, max_partes, cortes, union_p,
                                       union_c, diametro, holgura, altura, colores_d],
                         [informe, vista, archivos])
+
+    with gr.Tab("Mecanismos"), gr.Row():
+        with gr.Column():
+            gr.Markdown("Convierte el modelo en un mecanismo que funciona: la IA (Claude) detecta "
+                        "las piezas móviles (ruedas, brazos, bisagras), se les añaden ejes para "
+                        "imprimirlas y se crea una animación. Necesita `ANTHROPIC_API_KEY`.")
+            modelo_m = gr.File(label="Modelo (vacío = el último generado)",
+                               file_types=[".glb", ".gltf", ".stl", ".obj", ".ply"], type="filepath")
+            imagen_m = gr.Image(type="pil", label="Imagen original (opcional, ayuda a la IA)")
+            descripcion_m = gr.Textbox(label="Pistas para la IA (opcional)",
+                                       placeholder="p. ej. las 4 ruedas giran y el brazo lanza")
+            altura_m = gr.Number(value=0, label="Altura (mm, 0 = la del modelo; un .glb se escala a 60)")
+            boton_analizar = gr.Button("1. Analizar con IA", variant="primary")
+            piezas_m = gr.Code(language="json", label="Piezas móviles (editable)")
+            boton_vista_m = gr.Button("Actualizar vista previa")
+            modo_m = gr.Radio(list(MODOS_MEC), value=list(MODOS_MEC)[0], label="Uniones")
+            with gr.Row():
+                holgura_m = gr.Number(value=0.3, label="Holgura (mm)")
+                diametro_m = gr.Number(value=0, label="Diámetro del eje (mm, 0 = automático)")
+            boton_construir = gr.Button("2. Construir mecanismo", variant="primary")
+        with gr.Column():
+            informe_m = gr.Markdown()
+            previa_m = gr.Image(label="Piezas detectadas (cajas sobre las vistas)")
+            visor_m = gr.Model3D(label="Mecanismo animado")
+            archivos_m = gr.File(label="Descargar (.glb animado, .zip con STL, .3mf)",
+                                 file_count="multiple")
+    boton_analizar.click(analizar_app, [modelo_m, ultimo, imagen_m, descripcion_m, altura_m],
+                         [piezas_m, previa_m, informe_m])
+    boton_vista_m.click(vista_app, [modelo_m, ultimo, piezas_m, altura_m], previa_m)
+    boton_construir.click(construir_app, [modelo_m, ultimo, piezas_m, modo_m, holgura_m, diametro_m,
+                                          altura_m], [informe_m, visor_m, archivos_m])
 
 if __name__ == "__main__":
     demo.queue().launch()

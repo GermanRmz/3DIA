@@ -11,3 +11,5 @@ ninja
 pybind11
 # Cortes y uniones de la segmentación
 manifold3d
+# Mecanismos: la IA que identifica las piezas móviles
+anthropic
