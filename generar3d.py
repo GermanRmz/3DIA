@@ -325,6 +325,13 @@ def generar(imagen: Image.Image, salida: str, pasos: int = 5, resolucion: int = 
     malla = generar_forma(imagen, pasos, resolucion, semilla, dispositivo, intentos, modelo_forma)
     print(f"Forma: {time.time() - t:.1f} s ({len(malla.faces)} caras)")
 
+    # Partes desprendidas (la bolita de una antena) se reconectan y los restos
+    # sueltos se quitan; antes del limpiador de Hunyuan, que borraría las primeras.
+    import limpieza
+    avisos_trozos = []
+    malla = limpieza.reparar(malla, avisos_trozos)
+    for aviso in avisos_trozos:
+        print(aviso)
     from textura import preparar_malla
     malla = preparar_malla(malla)  # quita trozos sueltos y caras degeneradas
 
