@@ -21,7 +21,7 @@ from preparar_imagen import preparar
 
 def convertir(imagen, fondo, ajustar, pasos, resolucion, semilla, con_textura, resolucion_textura,
               max_caras, con_stl, acabado, altura_mm, escala, profundidad, colores, intentos,
-              progreso=gr.Progress(track_tqdm=True)):
+              modelo_forma, superres, nitida, progreso=gr.Progress(track_tqdm=True)):
     """Genera paso a paso y va mostrando el avance en la página."""
     if imagen is None:
         raise gr.Error("Sube una imagen primero.")
@@ -29,13 +29,14 @@ def convertir(imagen, fondo, ajustar, pasos, resolucion, semilla, con_textura, r
     salida = tempfile.NamedTemporaryFile(suffix=".glb", delete=False).name
     try:
         progreso(0, desc="Preparando la imagen...")
-        preparada, notas = preparar(imagen, FONDOS[fondo], ajustar)
+        preparada, notas = preparar(imagen, FONDOS[fondo], ajustar, superres)
         estado = "\n".join(f"- {n}" for n in notas)
         pasos_txt = "forma y textura (unos minutos)" if con_textura else "forma"
         yield preparada, None, None, None, None, None, estado + f"\n\n**Generando {pasos_txt}...**"
 
         generar(preparada, salida, int(pasos), int(resolucion), int(semilla),
                 textura=con_textura, fondo="mantener", ajustar=False, intentos=int(intentos),
+                modelo_forma=MODELOS_UI[modelo_forma], nitida=bool(nitida),
                 colores=int(colores), acabado=ACABADOS_UI[acabado] if con_stl else None, altura_mm=float(altura_mm),
                 escala_acabado=float(escala), profundidad_acabado=float(profundidad),
                 resolucion_textura=int(resolucion_textura), max_caras=int(max_caras))
@@ -174,6 +175,9 @@ ACABADOS_UI = {"Sin acabado (liso)": "ninguno",
 MODOS_MEC = {"Montada (se imprime ya ensamblada, print-in-place)": "montada",
              "Separadas (piezas y pasadores sueltos)": "separadas"}
 
+MODELOS_UI = {"Mini (rápido)": "mini",
+              "Estándar (más detalle; la primera vez descarga ~5 GB)": "estandar"}
+
 FONDOS = {"Automático": "auto", "IA": "ia", "Fondo blanco (sin IA)": "blanco",
           "No tocar": "mantener"}
 
@@ -186,6 +190,7 @@ with gr.Blocks(title="Imagen a 3D") as demo:
             entrada = gr.Image(type="pil", image_mode="RGBA", label="Imagen")
             fondo = gr.Radio(list(FONDOS), value="Automático", label="Quitar el fondo")
             ajustar = gr.Checkbox(value=True, label="Ajustar imagen (recortar, centrar, limpiar)")
+            superres = gr.Checkbox(value=True, label="Ampliar con IA las imágenes pequeñas (más detalle)")
             con_textura = gr.Checkbox(value=True, label="Pintar textura (color)")
             with gr.Accordion("Impresión 3D (.stl)", open=True):
                 con_stl = gr.Checkbox(value=True, label="Generar STL para imprimir")
@@ -200,13 +205,16 @@ with gr.Blocks(title="Imagen a 3D") as demo:
                     profundidad = gr.Number(value=0.5, label="Profundidad (mm)", interactive=False)
             boton = gr.Button("Generar 3D", variant="primary")
             with gr.Accordion("Opciones de forma", open=False):
+                modelo_forma = gr.Radio(list(MODELOS_UI), value=list(MODELOS_UI)[0], label="Modelo de forma")
                 pasos = gr.Slider(1, 30, value=5, step=1, label="Pasos")
-                resolucion = gr.Slider(128, 384, value=256, step=32, label="Resolución de la malla")
+                resolucion = gr.Slider(192, 512, value=380, step=4,
+                                       label="Resolución de la malla (más = más detalle, algo más lento)")
                 semilla = gr.Number(value=0, precision=0, label="Semilla")
                 intentos = gr.Slider(1, 10, value=6, step=1,
                                      label="Intentos si el modelo sale plano (otras semillas)")
             with gr.Accordion("Opciones de textura", open=False):
                 resolucion_textura = gr.Radio([1024, 2048], value=2048, label="Resolución de la textura")
+                nitida = gr.Checkbox(value=True, label="Textura nítida (amplía las vistas con IA)")
                 max_caras = gr.Slider(10000, 100000, value=40000, step=5000,
                                       label="Caras máximas al pintar")
         with gr.Column():
@@ -219,7 +227,8 @@ with gr.Blocks(title="Imagen a 3D") as demo:
                                   file_count="multiple")
     boton.click(convertir,
                 [entrada, fondo, ajustar, pasos, resolucion, semilla, con_textura, resolucion_textura,
-                 max_caras, con_stl, acabado, altura_mm, escala, profundidad, colores, intentos],
+                 max_caras, con_stl, acabado, altura_mm, escala, profundidad, colores, intentos,
+                 modelo_forma, superres, nitida],
                 [preparada, visor, archivo, visor_stl, archivo_stl, ultimo, estado],
                 show_progress_on=[visor])
     acabado.change(valores_acabado, acabado, [escala, profundidad])

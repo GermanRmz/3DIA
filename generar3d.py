@@ -17,6 +17,7 @@ from PIL import Image
 from preparar_imagen import preparar
 
 _pipeline = None
+_modelo_cargado = None  # "mini" o "estandar"
 _vae_normal = None  # decodificador original, por si FlashVDM falla
 _gpu_pequena = False  # <8 GB: codificador y decodificador normal viven en la CPU
 
@@ -27,9 +28,22 @@ def elegir_dispositivo(dispositivo: str = "auto") -> str:
     return "cuda" if torch.cuda.is_available() else "cpu"
 
 
-def cargar_pipeline(dispositivo: str = "auto"):
-    """Carga el modelo una sola vez (la primera vez descarga ~4 GB)."""
-    global _pipeline, _vae_normal, _gpu_pequena
+def descargar_forma():
+    """Quita el modelo de forma de la memoria (para cambiar de modelo)."""
+    global _pipeline, _vae_normal, _modelo_cargado, _en_gpu_antes
+    _pipeline, _vae_normal, _modelo_cargado, _en_gpu_antes = None, None, None, False
+    import gc
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
+def cargar_pipeline(dispositivo: str = "auto", modelo: str = "mini"):
+    """Carga el modelo una sola vez (la primera vez descarga ~4 GB el mini, ~5 GB
+    el estándar). Cambiar de modelo descarga el anterior de la memoria."""
+    global _pipeline, _vae_normal, _gpu_pequena, _modelo_cargado
+    if _pipeline is not None and _modelo_cargado != modelo:
+        descargar_forma()
     if _pipeline is not None and _pipeline.device.type == "cpu" and _en_gpu_antes:
         _mover_forma("cuda")
     if _pipeline is None:
@@ -40,10 +54,12 @@ def cargar_pipeline(dispositivo: str = "auto"):
         if en_gpu:
             torch.backends.cuda.matmul.allow_tf32 = True
             torch.backends.cudnn.allow_tf32 = True
-        carpeta = modelos.carpeta_forma(con_vae_rapido=en_gpu)
+        carpeta = modelos.carpeta_forma(con_vae_rapido=en_gpu, modelo=modelo)
+        _, dit, vae_rapido = modelos.MODELOS_FORMA[modelo]
+        _modelo_cargado = modelo
         _pipeline = Hunyuan3DDiTFlowMatchingPipeline.from_pretrained(
             carpeta,
-            subfolder=modelos.DIT_FORMA,
+            subfolder=dit,
             use_safetensors=True,
             variant="fp16",
             device=dispositivo,
@@ -64,7 +80,7 @@ def cargar_pipeline(dispositivo: str = "auto"):
             _vae_normal = _pipeline.vae.to("cpu" if _gpu_pequena else dispositivo)
             torch.cuda.empty_cache()
             _pipeline.vae = ShapeVAE.from_pretrained(
-                carpeta, subfolder=modelos.VAE_RAPIDO, use_safetensors=True,
+                carpeta, subfolder=vae_rapido, use_safetensors=True,
                 variant="fp16", device=dispositivo, dtype=torch.float16)
             _pipeline.enable_flashvdm(topk_mode="merge", replace_vae=False)
         _cachear_codificacion(_pipeline)
@@ -93,12 +109,20 @@ def _codificador_bajo_demanda(pipeline):
     original = pipeline.encode_cond
 
     def encode_cond(*args, **kwargs):
+        # Con el modelo estándar (2.2 GB) no caben a la vez generador y
+        # codificador en 6 GB: el generador espera en la CPU mientras se codifica.
+        apartar = _modelo_cargado == "estandar"
+        if apartar:
+            pipeline.model.to("cpu")
+            torch.cuda.empty_cache()
         pipeline.conditioner.to(pipeline.device)
         try:
             return original(*args, **kwargs)
         finally:
             pipeline.conditioner.to("cpu")
             torch.cuda.empty_cache()
+            if apartar:
+                pipeline.model.to(pipeline.device)
 
     pipeline.encode_cond = encode_cond
 
@@ -203,8 +227,21 @@ def _decodificar(pipeline, latentes, resolucion, trozos):
         _guardar_reserva()
 
 
-def generar_forma(imagen: Image.Image, pasos: int = 5, resolucion: int = 256,
-                  semilla: int = 0, dispositivo: str = "auto", intentos: int = 6):
+def generar_forma(imagen: Image.Image, pasos: int = 5, resolucion: int = 380,
+                  semilla: int = 0, dispositivo: str = "auto", intentos: int = 6,
+                  modelo: str = "mini"):
+    """Como _generar_forma; si el modelo estándar no cabe en la GPU, repite con el mini."""
+    try:
+        return _generar_forma(imagen, pasos, resolucion, semilla, dispositivo, intentos, modelo)
+    except torch.OutOfMemoryError:
+        if modelo == "mini":
+            raise
+        print("El modelo estándar no cabe en la memoria de la GPU; se usa el mini.")
+        descargar_forma()
+        return _generar_forma(imagen, pasos, resolucion, semilla, dispositivo, intentos, "mini")
+
+
+def _generar_forma(imagen, pasos, resolucion, semilla, dispositivo, intentos, modelo):
     """Devuelve la malla (trimesh) generada a partir de una imagen sin fondo.
 
     Con dibujos 2D el modelo a veces decide que el objeto es un recorte plano
@@ -212,7 +249,7 @@ def generar_forma(imagen: Image.Image, pasos: int = 5, resolucion: int = 256,
     semillas midiendo el grosor con una decodificación rápida de baja
     resolución, y solo la elegida se decodifica con calidad.
     """
-    pipeline = cargar_pipeline(dispositivo)
+    pipeline = cargar_pipeline(dispositivo, modelo)
     # En GPU, trozos grandes = menos llamadas a la red, pero más VRAM.
     trozos = 20000
     if str(pipeline.device).startswith("cuda"):
@@ -253,9 +290,10 @@ def ruta_color(salida: str, extension: str) -> str:
     return os.path.splitext(salida)[0] + "_impresion_color" + extension
 
 
-def generar(imagen: Image.Image, salida: str, pasos: int = 5, resolucion: int = 256,
+def generar(imagen: Image.Image, salida: str, pasos: int = 5, resolucion: int = 380,
             semilla: int = 0, dispositivo: str = "auto", textura: bool = True,
             fondo: str = "auto", ajustar: bool = True, intentos: int = 6,
+            modelo_forma: str = "mini", superres: bool = True,
             acabado: str | None = None, colores: int = 1,
             altura_mm: float = 60, escala_acabado: float | None = None,
             profundidad_acabado: float | None = None, segmentacion: dict | None = None,
@@ -275,7 +313,7 @@ def generar(imagen: Image.Image, salida: str, pasos: int = 5, resolucion: int = 
     previa *_partes.glb.
     La imagen ya preparada se guarda junto a la salida como *_entrada.png.
     """
-    imagen, notas = preparar(imagen, fondo, ajustar)
+    imagen, notas = preparar(imagen, fondo, ajustar, superres)
     for nota in notas:
         print(nota)
     imagen.save(os.path.splitext(salida)[0] + "_entrada.png")
@@ -284,7 +322,7 @@ def generar(imagen: Image.Image, salida: str, pasos: int = 5, resolucion: int = 
         comprobar_dependencias()  # falla antes de gastar tiempo en la forma
 
     t = time.time()
-    malla = generar_forma(imagen, pasos, resolucion, semilla, dispositivo, intentos)
+    malla = generar_forma(imagen, pasos, resolucion, semilla, dispositivo, intentos, modelo_forma)
     print(f"Forma: {time.time() - t:.1f} s ({len(malla.faces)} caras)")
 
     from textura import preparar_malla
@@ -362,8 +400,13 @@ def main():
     p.add_argument("imagen", help="Imagen de entrada (png, jpg, webp)")
     p.add_argument("-o", "--salida", default="modelo.glb", help="Archivo de salida (.glb, .obj, .stl)")
     p.add_argument("--pasos", type=int, default=5, help="Pasos de difusión de la forma (el modelo turbo usa 5)")
-    p.add_argument("--resolucion", type=int, default=256,
-                   help="Resolución de la malla; en CPU usa 128-192 para que no tarde tanto")
+    p.add_argument("--resolucion", type=int, default=380,
+                   help="Resolución de la malla (380 recomendado; hasta 512 para más detalle); "
+                        "en CPU usa 128-192 para que no tarde tanto")
+    p.add_argument("--modelo", default="mini", choices=list(modelos.MODELOS_FORMA),
+                   help="mini: rápido; estandar: Hunyuan3D-2 de 1.1 B, más detalle (+5 GB de descarga)")
+    p.add_argument("--sin-superres", action="store_true",
+                   help="No ampliar con IA las imágenes pequeñas ni las vistas de la textura")
     p.add_argument("--semilla", type=int, default=0)
     p.add_argument("--intentos", type=int, default=6,
                    help="Si el modelo sale plano, cuántas semillas probar (1 = no reintentar)")
@@ -424,7 +467,8 @@ def main():
     inicio = time.time()
     generar(Image.open(args.imagen), args.salida, args.pasos, args.resolucion,
             args.semilla, args.dispositivo, textura=not args.sin_textura, fondo=args.fondo,
-            ajustar=not args.sin_ajustar, intentos=args.intentos, acabado=args.acabado,
+            ajustar=not args.sin_ajustar, intentos=args.intentos, modelo_forma=args.modelo,
+            superres=not args.sin_superres, nitida=not args.sin_superres, acabado=args.acabado,
             colores=args.colores, altura_mm=args.altura_mm,
             escala_acabado=args.escala_acabado, profundidad_acabado=args.profundidad_acabado,
             segmentacion=segmentacion,

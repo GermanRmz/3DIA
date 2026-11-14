@@ -70,7 +70,9 @@ python generar3d.py figura.png -o figura.glb
 Opciones útiles:
 
 - `--sin-textura`: solo la forma (funciona también en CPU con `--dispositivo cpu`).
-- `--resolucion 192`: forma más rápida, menos detalle.
+- `--resolucion 512`: más detalle en la malla (por defecto 380); 192 es más rápido.
+- `--modelo estandar`: Hunyuan3D-2 de 1.1 B en vez del mini, más detalle (ver *Calidad*).
+- `--sin-superres`: no ampliar con IA las imágenes pequeñas ni las vistas de la textura.
 - `--semilla 1`: otra variante.
 - `--resolucion-textura 1024`: textura más rápida y con menos VRAM.
 - `--max-caras 20000`: menos caras al pintar, más rápido.
@@ -231,6 +233,21 @@ con calidad. La imagen se codifica una sola vez para todos los intentos.
 
 `python diagnostico.py imagen.png` genera y mide la forma de varias maneras en tu
 GPU, por si hay que investigar más.
+
+## Calidad
+
+- **Imágenes pequeñas ampliadas con IA**: si el objeto mide menos de 768 px se
+  amplía x4 con Real-ESRGAN (`superres.py`) antes de generar: bordes y detalles
+  nítidos en vez de una imagen estirada y borrosa.
+- **Textura nítida**: Hunyuan3D-Paint pinta 6 vistas de 512 px y las estira a la
+  textura de 2048; aquí se amplían con IA (como hace Hunyuan3D 2.1), así la textura
+  conserva el detalle. Tarda unos segundos más en GPU.
+- **Malla a 380** de resolución (antes 256), el valor de los ejemplos de Hunyuan:
+  superficies más finas y menos agujeros en piezas delgadas (patas, colas).
+- **Modelo estándar** (opción *Modelo de forma* o `--modelo estandar`):
+  Hunyuan3D-2 de 1.1 B parámetros, formas más fieles y detalladas que el mini
+  (0.6 B). La primera vez descarga ~5 GB; en GPUs de 6 GB el generador y el
+  codificador se turnan en la memoria, y si aun así no cabe se vuelve al mini.
 
 ## Velocidad
 

@@ -10,6 +10,8 @@ Optimizaciones respecto al ejemplo oficial:
   fijos en el modelo turbo).
 - La malla se reduce antes de desplegar UVs (xatlas es lento con muchas caras).
 - El relleno de huecos de la textura está vectorizado (ver relleno_uv.py).
+- Las 6 vistas (512 px) se amplían con IA (superres.py) hasta la resolución de la
+  textura, en vez de estirarlas: la textura sale mucho más nítida.
 - En GPUs con poca VRAM los modelos se mueven a CPU cuando no se usan.
 
 Necesita GPU NVIDIA. Si el módulo compilado `custom_rasterizer` no está, se usa
@@ -55,6 +57,32 @@ class _PasosFijos:
 
     def __getattr__(self, nombre):
         return getattr(self._pipeline, nombre)
+
+
+class _VistasNitidas:
+    """Envuelve el modelo de vistas: amplía con IA (x4) cada vista generada antes
+    de proyectarla en la textura. hy3dgen las estira con un reescalado simple."""
+
+    def __init__(self, modelo):
+        self._modelo = modelo
+        self.activo = True
+
+    def __call__(self, *args, **kwargs):
+        vistas = self._modelo(*args, **kwargs)
+        if not self.activo:
+            return vistas
+        import superres
+
+        try:
+            vistas = [superres.ampliar(v) for v in vistas]
+        except Exception as e:  # sin red la primera vez, sin memoria...
+            print(f"No se pudieron ampliar las vistas con IA ({e}); se estiran sin más.")
+        finally:
+            superres.liberar()
+        return vistas
+
+    def __getattr__(self, nombre):
+        return getattr(self._modelo, nombre)
 
 
 def _uv_inpaint_rapido(self, texture, mask):
@@ -132,6 +160,7 @@ def cargar_pintor(resolucion_textura: int = 2048, pasos_luz: int = 25,
             _pintor.enable_model_cpu_offload(device="cuda")
         luz = _pintor.models["delight_model"]
         luz.pipeline = _PasosFijos(luz.pipeline, pasos_luz)
+        _pintor.models["multiview_model"] = _VistasNitidas(_pintor.models["multiview_model"])
         _config_pintor = {"vram_baja": vram_baja, "resolucion": resolucion_textura}
 
     _pintor.models["delight_model"].pipeline.pasos = pasos_luz
@@ -158,9 +187,11 @@ def preparar_malla(malla, max_caras: int | None = None):
 
 
 def texturizar(malla, imagen, max_caras: int = 40000, resolucion_textura: int = 2048,
-               pasos_luz: int = 25, vram_baja: bool | None = None):
-    """Devuelve la malla con textura de color. `imagen` debe venir sin fondo (RGBA)."""
+               pasos_luz: int = 25, vram_baja: bool | None = None, nitida: bool = True):
+    """Devuelve la malla con textura de color. `imagen` debe venir sin fondo (RGBA).
+    Con `nitida`, las vistas se amplían con IA antes de proyectarlas."""
     pintor = cargar_pintor(resolucion_textura, pasos_luz, vram_baja)
+    pintor.models["multiview_model"].activo = nitida
     malla = preparar_malla(malla, max_caras)
     try:
         resultado = pintor(malla.copy(), image=imagen)

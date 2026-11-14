@@ -13,3 +13,5 @@ pybind11
 manifold3d
 # Mecanismos: la IA que identifica las piezas móviles
 anthropic
+# Superresolución con IA (Real-ESRGAN): imágenes pequeñas y vistas de la textura
+spandrel

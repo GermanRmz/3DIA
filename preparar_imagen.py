@@ -16,7 +16,9 @@ Ajustar la imagen (`ajustar`):
   - Corrige la rotación de fotos de móvil (EXIF) y reduce las muy grandes.
   - Quita manchas sueltas de la máscara y la semitransparencia del interior.
   - Recorta alrededor del objeto con margen y lo deja cuadrado.
-  - Avisa si el objeto está cortado por el borde o es muy pequeño.
+  - Avisa si el objeto está cortado por el borde.
+  - Si el objeto es pequeño (menos de 768 px), lo amplía x4 con IA
+    (superres.py, Real-ESRGAN): más detalle en la forma y en la textura.
 """
 import cv2
 import numpy as np
@@ -24,6 +26,7 @@ from PIL import Image, ImageOps
 
 LADO_MAXIMO = 1536      # las fotos más grandes se reducen (los modelos usan ~512)
 LADO_MINIMO_OBJETO = 300
+LADO_AMPLIAR = 768      # por debajo, el objeto se amplía con IA
 MODELO_IA = "birefnet-general-lite"
 
 _sesion_ia = None
@@ -95,9 +98,10 @@ def quitar_fondo(imagen: Image.Image, fondo: str = "auto") -> tuple[np.ndarray, 
     return _fondo_por_ia(imagen), "Fondo: quitado con IA."
 
 
-def preparar(imagen: Image.Image, fondo: str = "auto",
-             ajustar: bool = True) -> tuple[Image.Image, list[str]]:
-    """Devuelve (imagen RGBA lista para el modelo, lista de notas y avisos)."""
+def preparar(imagen: Image.Image, fondo: str = "auto", ajustar: bool = True,
+             superres: bool = True) -> tuple[Image.Image, list[str]]:
+    """Devuelve (imagen RGBA lista para el modelo, lista de notas y avisos). Con
+    `ajustar` y `superres`, un objeto pequeño se amplía con IA."""
     if ajustar:
         imagen = ImageOps.exif_transpose(imagen)
         if max(imagen.size) > LADO_MAXIMO:
@@ -118,12 +122,25 @@ def preparar(imagen: Image.Image, fondo: str = "auto",
     if (bordes > 127).mean() > 0.03:
         notas.append("Aviso: el objeto toca el borde de la foto (¿está cortado?). "
                      "El 3D sale mejor si se ve completo.")
-    resultado = _recortar_cuadrado(rgba)
-    lado_objeto = int(resultado.shape[0] / 1.24)
+    resultado = Image.fromarray(_recortar_cuadrado(rgba), "RGBA")
+    lado_objeto = int(resultado.width / 1.24)
+    if superres and resultado.width < LADO_AMPLIAR:
+        try:
+            import superres as sr
+
+            antes = resultado.width
+            resultado = sr.ampliar(resultado)
+            sr.liberar()
+            if resultado.width > LADO_MAXIMO:
+                resultado.thumbnail((LADO_MAXIMO, LADO_MAXIMO), Image.LANCZOS)
+            notas.append(f"Imagen pequeña ({antes} px): ampliada con IA a {resultado.width} px "
+                         "para ganar detalle.")
+        except Exception as e:  # sin red la primera vez, etc.: se sigue sin ampliar
+            notas.append(f"No se pudo ampliar la imagen con IA ({e}).")
     if lado_objeto < LADO_MINIMO_OBJETO:
-        notas.append(f"Aviso: el objeto mide solo ~{lado_objeto} px; con una imagen de más "
-                     "resolución saldrán más detalles.")
-    return Image.fromarray(resultado, "RGBA"), notas
+        notas.append(f"Aviso: el objeto mide solo ~{lado_objeto} px en la foto original; con una "
+                     "imagen de más resolución saldrán más detalles reales.")
+    return resultado, notas
 
 
 def liberar():
