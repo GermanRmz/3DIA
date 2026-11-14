@@ -34,7 +34,8 @@ ALARGAMIENTO = 1.0       # largo mínimo / ancho del corte
 CORTE_MAXIMO = 0.3      # área del corte / sección más ancha de la figura
 SOLIDEZ_MINIMA = 0.5
 MIRAR_ADELANTE = 8       # niveles que se miran tras una fusión
-CRECIMIENTO = 2.5        # si la sección fusionada crece esto, lo que llega son apéndices     # área de las secciones / área de su envolvente convexa
+CRECIMIENTO = 2.5
+SOLAPE_MAXIMO = 0.75     # si queda menos de esto del apéndice estimado, ya se cortó en parte        # si la sección fusionada crece esto, lo que llega son apéndices     # área de las secciones / área de su envolvente convexa
 
 
 @dataclass
@@ -44,7 +45,10 @@ class Apendice:
     corte: float           # nivel del corte
     secciones: list        # CrossSections del trozo, del extremo al corte
     volumen: float
+    niveles: list = field(default_factory=list)   # altura de cada sección
     cuello: bool = False   # corte en un estrechamiento (si no, en una fusión)
+    alargamiento: float = 0.0
+    paso: float = 1.0
 
 
 @dataclass
@@ -133,17 +137,19 @@ def _cadenas(m_marco, z0, z1):
 
 
 def _antepasados(c, registro):
-    """Secciones e inicio de la cadena junto con todas las que se fundieron en ella."""
-    secciones, inicio, pendientes, vistos = [], c["niveles"][0], [c], set()
+    """Secciones (con sus niveles) e inicio de las cadenas que se fundieron en esta."""
+    secciones, niveles, inicio, pendientes, vistos = [], [], c["niveles"][0], [c], set()
     while pendientes:
         x = pendientes.pop()
         if id(x) in vistos:
             continue
         vistos.add(id(x))
-        secciones += x["secciones"]
+        if x is not c:
+            secciones += x["secciones"]
+            niveles += x["niveles"]
         inicio = min(inicio, x["niveles"][0])
         pendientes += [registro[h] for h in x.get("hijos", []) if h in registro]
-    return secciones, inicio
+    return secciones, niveles, inicio
 
 
 def _estrechamiento(areas):
@@ -209,21 +215,24 @@ def detectar(malla: trimesh.Trimesh) -> list[Apendice]:
                 solidez = np.mean([s.area() / max(s.hull().area(), 1e-9) for s in muestras])
                 if solidez < SOLIDEZ_MINIMA:
                     continue
-                secciones, inicio = c["secciones"][:n], c["niveles"][0]
+                secciones, alturas, inicio = c["secciones"][:n], c["niveles"][:n], c["niveles"][0]
                 if vol_max == VOLUMEN_MAXIMO_CUELLO:
                     # Corte en un cuello: la pieza es todo lo que hay más allá (la
                     # cabeza entera con las orejas o cuernos que se fundieron en ella).
-                    previas, inicio = _antepasados(c, registro)
-                    secciones = previas + secciones
+                    previas, niveles_previos, inicio = _antepasados(c, registro)
+                    secciones, alturas = previas + secciones, niveles_previos + alturas
                 candidatos.append(Apendice(nombre, float(inicio - paso),
                                            float(c["niveles"][n - 1]), secciones, vol,
-                                           cuello=vol_max == VOLUMEN_MAXIMO_CUELLO))
+                                           niveles=[float(h) for h in alturas],
+                                           cuello=vol_max == VOLUMEN_MAXIMO_CUELLO,
+                                           alargamiento=largo / np.sqrt(areas[n - 1]),
+                                           paso=float(paso)))
                 aceptadas.add(id(c))
                 break
-    # Primero los apéndices que se funden en el cuerpo (patas, cola...), de mayor a
-    # menor, y al final los cortes de cuello: así las patas salen del cuerpo antes
+    # Primero los apéndices que se funden en el cuerpo, los más alargados antes
+    # (patas y colas antes que bloques como una cadera), y al final los cortes de cuello: así las patas salen del cuerpo antes
     # de separar la cabeza.
-    return sorted(candidatos, key=lambda a: (a.cuello, -a.volumen))
+    return sorted(candidatos, key=lambda a: (a.cuello, -a.alargamiento))
 
 
 def dividir(malla: trimesh.Trimesh, max_partes: int = 8,
@@ -242,31 +251,40 @@ def dividir(malla: trimesh.Trimesh, max_partes: int = 8,
         normal = -np.asarray(DIRECCIONES[a.direccion], float)
         ida, vuelta = _marco_plano((0, 0, 0), normal)
         cm = cuerpo.transform(ida)
-        # Cortador: la huella del apéndice (sus secciones, algo ensanchadas)
-        # extruida desde el extremo hasta el corte.
-        huella = a.secciones[0]
-        for s in a.secciones[1:]:
-            huella = huella + s
-        huella = huella.offset(0.5, m3d.JoinType.Round)
-        alto = a.corte - a.inicio + 1.0
-        cortador = huella.extrude(alto).translate((0, 0, a.inicio - 1.0))
+        # Cortador: cada sección del apéndice (algo ensanchada) extruida solo en su
+        # rodaja; así sigue la forma del apéndice y no se lleva lo que no es suyo.
+        holgura = max(0.5, 0.5 * a.paso)
+        rodajas = []
+        for sec, h in zip(a.secciones, a.niveles):
+            z0 = h - 0.6 * a.paso
+            if h <= a.inicio + 1.5 * a.paso:
+                z0 = a.inicio - 1.0                  # la primera llega hasta el extremo
+            rodajas.append(sec.offset(holgura, m3d.JoinType.Round).extrude(h + 0.6 * a.paso - z0)
+                           .translate((0, 0, z0)))
+        cortador = m3d.Manifold.batch_boolean(rodajas, m3d.OpType.Add)
+        # Que no pase del plano de corte.
+        b = np.asarray(cortador.bounding_box())
+        cortador = cortador ^ m3d.Manifold.cube((b[3] - b[0] + 2, b[4] - b[1] + 2, a.corte - b[2] + 1)) \
+            .translate((b[0] - 1, b[1] - 1, b[2] - 1))
         pieza = cm ^ cortador
         if pieza.is_empty():
             continue
         trozos = sorted(pieza.decompose(), key=lambda t: -t.volume())
-        # Si ya se cortó desde otra dirección, aquí quedaría poco (o un trozo del
-        # cuerpo): se descarta.
-        if trozos[0].volume() < max(VOLUMEN_MINIMO * cuerpo.volume(), 0.5 * a.volumen):
+        # Si ya se cortó desde otra dirección (o parte de esta zona ya salió con
+        # otras piezas, como las patas de un bloque de cadera), se descarta.
+        if trozos[0].volume() < max(VOLUMEN_MINIMO * volumen_total, SOLAPE_MAXIMO * a.volumen):
             continue
-        pieza = trozos[0]
         resto = cm - cortador
+        partes_resto = sorted(resto.decompose(), key=lambda t: -t.volume())
         # Si casi no queda cuerpo, ese corte ya se hizo desde el otro lado (el mismo
         # cuello visto desde arriba y desde abajo).
-        if resto.volume() < 0.15 * volumen_total:
+        if not partes_resto or partes_resto[0].volume() < 0.15 * volumen_total:
             continue
-        for t in trozos[1:]:                       # lo que no es del apéndice vuelve
-            if t.volume() > 1.0:
-                resto = resto + t
+        # Sin trozos sueltos: lo que el cortador abarca pero no es del apéndice vuelve
+        # al cuerpo, y lo que en el cuerpo quedaría suelto (unido solo a través del
+        # apéndice, como placas de una armadura) se va con el apéndice.
+        pieza = m3d.Manifold.batch_boolean([trozos[0]] + partes_resto[1:], m3d.OpType.Add)
+        resto = m3d.Manifold.batch_boolean([partes_resto[0]] + trozos[1:], m3d.OpType.Add)
         avisos = []
         pieza, resto = _unir(pieza, resto, np.eye(4)[:3], np.eye(4)[:3], a.corte, -1, union,
                              avisos, a.direccion)
