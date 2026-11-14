@@ -86,11 +86,11 @@ def _modelo_mecanismo(archivo, ultimo, altura):
         ruta = ruta_impresion(ultimo) if os.path.exists(ruta_impresion(ultimo)) else ultimo
     if not ruta:
         raise gr.Error("Sube un modelo o genera uno en la pestaña Generar.")
-    return cargar(ruta, float(altura) or None)[0]
+    return cargar(ruta, float(altura) or None)
 
 
 def analizar_app(archivo, ultimo, imagen, descripcion, altura):
-    malla = _modelo_mecanismo(archivo, ultimo, altura)
+    malla, _ = _modelo_mecanismo(archivo, ultimo, altura)
     try:
         piezas, resumen = mecanismos.analizar(malla, imagen, descripcion or "")
     except Exception as e:  # sin clave, sin red, rechazo...
@@ -100,7 +100,7 @@ def analizar_app(archivo, ultimo, imagen, descripcion, altura):
 
 
 def vista_app(archivo, ultimo, texto, altura):
-    malla = _modelo_mecanismo(archivo, ultimo, altura)
+    malla, _ = _modelo_mecanismo(archivo, ultimo, altura)
     try:
         piezas = mecanismos.desde_json(texto or "{}")
     except (ValueError, TypeError) as e:
@@ -108,8 +108,8 @@ def vista_app(archivo, ultimo, texto, altura):
     return mecanismos.vista_previa(malla, piezas)
 
 
-def construir_app(archivo, ultimo, texto, modo, holgura, diametro, altura):
-    malla = _modelo_mecanismo(archivo, ultimo, altura)
+def construir_app(archivo, ultimo, texto, modo, holgura, diametro, altura, colores):
+    malla, textura = _modelo_mecanismo(archivo, ultimo, altura)
     try:
         piezas = mecanismos.desde_json(texto or "{}")
     except (ValueError, TypeError) as e:
@@ -121,8 +121,11 @@ def construir_app(archivo, ultimo, texto, modo, holgura, diametro, altura):
         mec = mecanismos.construir(malla, piezas, clave, float(holgura), float(diametro or 0))
     except (RuntimeError, ValueError) as e:
         raise gr.Error(str(e))
+    mecanismos.colorear(mec, malla, textura)
+    if textura is None:
+        mec.avisos.append("El modelo no tiene textura: se usa un color por pieza (sube el .glb con color).")
     base = tempfile.NamedTemporaryFile(suffix="", delete=False).name
-    rutas = mecanismos.exportar(mec, base, clave)
+    rutas = mecanismos.exportar(mec, base, clave, int(colores))
     lineas = [f"- **{p.nombre}**: {p.tipo}" for p in mec.partes] + [f"- Aviso: {a}" for a in mec.avisos]
     return "\n".join(lineas), rutas["glb"], [rutas["glb"], rutas["zip"], rutas["3mf"]]
 
@@ -278,6 +281,9 @@ with gr.Blocks(title="Imagen a 3D") as demo:
             with gr.Row():
                 holgura_m = gr.Number(value=0.3, label="Holgura (mm)")
                 diametro_m = gr.Number(value=0, label="Diámetro del eje (mm, 0 = automático)")
+            colores_m = gr.Slider(1, 8, value=1, step=1,
+                                  label="Colores de filamento en el .3mf (1 = sin pintar; el .glb "
+                                        "siempre lleva los colores del modelo)")
             boton_construir = gr.Button("2. Construir mecanismo", variant="primary")
         with gr.Column():
             informe_m = gr.Markdown()
@@ -289,7 +295,7 @@ with gr.Blocks(title="Imagen a 3D") as demo:
                          [piezas_m, previa_m, informe_m])
     boton_vista_m.click(vista_app, [modelo_m, ultimo, piezas_m, altura_m], previa_m)
     boton_construir.click(construir_app, [modelo_m, ultimo, piezas_m, modo_m, holgura_m, diametro_m,
-                                          altura_m], [informe_m, visor_m, archivos_m])
+                                          altura_m, colores_m], [informe_m, visor_m, archivos_m])
 
 if __name__ == "__main__":
     demo.queue().launch()

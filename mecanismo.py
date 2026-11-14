@@ -32,9 +32,10 @@ def main():
     p.add_argument("--holgura", type=float, default=0.3, help="Juego entre piezas móviles (mm)")
     p.add_argument("--diametro", type=float, default=0.0, help="Diámetro de los pasadores (0 = auto)")
     p.add_argument("--altura-mm", type=float, help="Altura final del modelo (mm)")
+    p.add_argument("--colores", type=int, default=1, help="Filamentos para el 3MF pintado (.glb con textura)")
     args = p.parse_args()
 
-    malla, _ = cargar(args.modelo, args.altura_mm)
+    malla, textura = cargar(args.modelo, args.altura_mm)
     base = os.path.splitext(args.modelo)[0]
     if args.piezas:
         with open(args.piezas, encoding="utf-8") as f:
@@ -50,9 +51,10 @@ def main():
         print(f"- {pz.nombre}: {pz.tipo}, eje {pz.eje}, pivote {pz.pivote}. {pz.explicacion}")
     mecanismos.vista_previa(malla, piezas).save(base + "_piezas.png")
     mec = mecanismos.construir(malla, piezas, args.modo, args.holgura, args.diametro)
+    mecanismos.colorear(mec, malla, textura)
+    rutas = mecanismos.exportar(mec, base, args.modo, args.colores)
     for aviso in mec.avisos:
         print("Aviso:", aviso)
-    rutas = mecanismos.exportar(mec, base, args.modo)
     print("Archivos:", ", ".join(rutas.values()), base + "_piezas.png")
 
 

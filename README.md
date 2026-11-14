@@ -197,7 +197,11 @@ giran y un brazo que lanza, un cofre con tapa, una mandíbula...
    en piezas finas, uno de 2 mm impreso (montada) o un trozo de filamento de
    1,75 mm (separadas). Si no cabe ninguno (una cola de 2 mm), la pieza queda sin
    eje y el informe lo dice.
-3. Descargas: `.glb` animado (Blender, visores web; las ruedas giran y el brazo
+3. Colores: si subes el `.glb` con textura (el que genera la app), cada pieza
+   conserva sus colores en el `.glb` animado, y con *Colores de filamento* > 1 el
+   `.3mf` sale pintado por filamentos (impresoras multicolor). Un `.stl` no tiene
+   color: se usa uno por pieza.
+4. Descargas: `.glb` animado (Blender, visores web; las ruedas giran y el brazo
    sube y vuelve), `.zip` con un STL por pieza y los pasadores, y `.3mf`.
 
 La IA necesita una clave de la API de Anthropic (cada análisis, con su revisión,
@@ -210,7 +214,7 @@ export ANTHROPIC_API_KEY="tu-clave"
 Sin clave puedes escribir el JSON tú mismo y pulsar *Construir*. Desde la terminal:
 
 ```bash
-python mecanismo.py catapulta.glb --imagen catapulta.png --modo montada
+python mecanismo.py catapulta.glb --imagen catapulta.png --modo montada --colores 4
 python mecanismo.py catapulta.glb --piezas catapulta_piezas.json --modo separadas
 ```
 

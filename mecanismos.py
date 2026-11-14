@@ -124,6 +124,7 @@ class Mecanismo:
     partes: list = field(default_factory=list)       # Articulacion (animacion.py)
     pasadores: list = field(default_factory=list)    # trimesh
     avisos: list = field(default_factory=list)
+    colores_caras: list = field(default_factory=list)  # RGB por cara de cada parte
 
 
 EJES = {"x": (1.0, 0, 0), "y": (0, 1.0, 0), "z": (0, 0, 1.0)}
@@ -808,8 +809,34 @@ def _eje(p: PiezaMovil, hija, cuerpo, modo, holgura, diametro, res):
 
 # --- 3. Salidas --------------------------------------------------------------------
 
-def exportar(mec: Mecanismo, base: str, modo: str) -> dict:
-    """Escribe <base>_mecanismo.glb (animado), .zip y .3mf para imprimir."""
+def colorear(mec: Mecanismo, impresion: trimesh.Trimesh, textura) -> None:
+    """Pone a cada parte los colores del modelo original (de su textura), para el
+    .glb animado. `impresion` es la malla de cargar() y `textura` la malla con
+    textura que devuelve también."""
+    import multicolor
+
+    if textura is None or impresion.metadata.get("transformacion") is None:
+        return
+    tex = textura.copy()
+    tex.apply_transform(impresion.metadata["transformacion"])
+    puntos = np.vstack([a.malla.vertices for a in mec.partes] + [a.malla.triangles_center for a in mec.partes])
+    colores = multicolor.colores_en_puntos(tex, puntos)
+    n_v = sum(len(a.malla.vertices) for a in mec.partes)
+    inicio = 0
+    for a in mec.partes:
+        a.colores_vertices = colores[inicio:inicio + len(a.malla.vertices)]
+        inicio += len(a.malla.vertices)
+    mec.colores_caras = []
+    inicio = n_v
+    for a in mec.partes:
+        mec.colores_caras.append(colores[inicio:inicio + len(a.malla.faces)])
+        inicio += len(a.malla.faces)
+
+
+def exportar(mec: Mecanismo, base: str, modo: str, n_colores: int = 1) -> dict:
+    """Escribe <base>_mecanismo.glb (animado), .zip y .3mf para imprimir. Con
+    n_colores > 1 (y colores de colorear()), el 3MF va pintado por filamentos."""
+    import multicolor
     import segmentar
 
     rutas = {"glb": base + "_mecanismo.glb", "zip": base + "_mecanismo.zip",
@@ -818,11 +845,19 @@ def exportar(mec: Mecanismo, base: str, modo: str) -> dict:
     res = Resultado(partes=[a.malla for a in mec.partes], pasadores=mec.pasadores,
                     nombres=[a.nombre for a in mec.partes])
     segmentar.exportar_zip(rutas["zip"], res)
+    etiquetas, paleta = None, None
+    caras = getattr(mec, "colores_caras", None)
+    if n_colores > 1 and caras:
+        todas, paleta = multicolor.cuantizar(np.vstack(caras), n_colores)
+        etiquetas = np.split(todas, np.cumsum([len(c) for c in caras])[:-1])
+        mec.avisos.append("Filamentos: " + ", ".join(f"{i + 1}: #{r:02X}{g:02X}{b:02X}"
+                                                    for i, (r, g, b) in enumerate(paleta)))
     if modo == "montada":
         # Print-in-place: las piezas van en su sitio, ya montadas, en un solo 3MF.
         montado = Resultado(partes=[trimesh.util.concatenate([a.malla for a in mec.partes])],
                             nombres=["mecanismo montado"])
-        segmentar.exportar_3mf(rutas["3mf"], montado)
+        segmentar.exportar_3mf(rutas["3mf"], montado,
+                               [np.concatenate(etiquetas)] if etiquetas is not None else None, paleta)
     else:
-        segmentar.exportar_3mf(rutas["3mf"], res)
+        segmentar.exportar_3mf(rutas["3mf"], res, etiquetas, paleta)
     return rutas

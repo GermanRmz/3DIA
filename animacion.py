@@ -30,6 +30,7 @@ class Articulacion:
     movimiento: str = "lanzar"   # bisagra: "lanzar" (rápido y vuelve) u "oscilar" (vaivén)
     fase: float = 0.0            # desfase en el ciclo (0-1), p. ej. patas alternas
     color: tuple = (200, 200, 200)
+    colores_vertices: object = None   # (N, 3|4) uint8: colores del modelo original
 
 
 def _cuaternion(eje, angulo_grados):
@@ -57,7 +58,13 @@ def exportar_glb(ruta: str, partes: list, duracion: float = 2.0, fotogramas: int
         m.apply_transform(giro)
         pivote = trimesh.transform_points([p.pivote], giro)[0]
         m.apply_translation(-pivote)
-        m.visual.face_colors = (*p.color, 255)
+        if p.colores_vertices is not None and len(p.colores_vertices) == len(m.vertices):
+            cv = np.asarray(p.colores_vertices, np.uint8)
+            if cv.shape[1] == 3:
+                cv = np.hstack([cv, np.full((len(cv), 1), 255, np.uint8)])
+            m.visual = trimesh.visual.ColorVisuals(m, vertex_colors=cv)
+        else:
+            m.visual.face_colors = (*p.color, 255)
         pivotes[p.nombre] = pivote
         escena.add_geometry(m, node_name=p.nombre, geom_name=p.nombre,
                             transform=trimesh.transformations.translation_matrix(pivote))
