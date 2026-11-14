@@ -235,6 +235,32 @@ def detectar(malla: trimesh.Trimesh) -> list[Apendice]:
     return sorted(candidatos, key=lambda a: (a.cuello, -a.alargamiento))
 
 
+def marco(a: Apendice):
+    """(ida, vuelta): el marco del apéndice, con su extremo abajo y el corte en z = a.corte."""
+    return _marco_plano((0, 0, 0), -np.asarray(DIRECCIONES[a.direccion], float))
+
+
+def cortador_apendice(a: Apendice):
+    """Sólido (en el marco del apéndice) que abarca el apéndice hasta su corte: cada
+    sección, algo ensanchada, extruida solo en su rodaja; así sigue la forma del
+    apéndice y no se lleva lo que no es suyo."""
+    import manifold3d as m3d
+
+    holgura = max(0.5, 0.5 * a.paso)
+    rodajas = []
+    for sec, h in zip(a.secciones, a.niveles):
+        z0 = h - 0.6 * a.paso
+        if h <= a.inicio + 1.5 * a.paso:
+            z0 = a.inicio - 1.0                  # la primera llega hasta el extremo
+        rodajas.append(sec.offset(holgura, m3d.JoinType.Round).extrude(h + 0.6 * a.paso - z0)
+                       .translate((0, 0, z0)))
+    cortador = m3d.Manifold.batch_boolean(rodajas, m3d.OpType.Add)
+    # Que no pase del plano de corte.
+    b = np.asarray(cortador.bounding_box())
+    return cortador ^ m3d.Manifold.cube((b[3] - b[0] + 2, b[4] - b[1] + 2, a.corte - b[2] + 1)) \
+        .translate((b[0] - 1, b[1] - 1, b[2] - 1))
+
+
 def dividir(malla: trimesh.Trimesh, max_partes: int = 8,
             union: OpcionesUnion | None = None) -> DivisionForma:
     import manifold3d as m3d
@@ -248,24 +274,9 @@ def dividir(malla: trimesh.Trimesh, max_partes: int = 8,
     for a in detectar(malla):
         if len(piezas) + 1 >= max_partes:
             break
-        normal = -np.asarray(DIRECCIONES[a.direccion], float)
-        ida, vuelta = _marco_plano((0, 0, 0), normal)
+        ida, vuelta = marco(a)
         cm = cuerpo.transform(ida)
-        # Cortador: cada sección del apéndice (algo ensanchada) extruida solo en su
-        # rodaja; así sigue la forma del apéndice y no se lleva lo que no es suyo.
-        holgura = max(0.5, 0.5 * a.paso)
-        rodajas = []
-        for sec, h in zip(a.secciones, a.niveles):
-            z0 = h - 0.6 * a.paso
-            if h <= a.inicio + 1.5 * a.paso:
-                z0 = a.inicio - 1.0                  # la primera llega hasta el extremo
-            rodajas.append(sec.offset(holgura, m3d.JoinType.Round).extrude(h + 0.6 * a.paso - z0)
-                           .translate((0, 0, z0)))
-        cortador = m3d.Manifold.batch_boolean(rodajas, m3d.OpType.Add)
-        # Que no pase del plano de corte.
-        b = np.asarray(cortador.bounding_box())
-        cortador = cortador ^ m3d.Manifold.cube((b[3] - b[0] + 2, b[4] - b[1] + 2, a.corte - b[2] + 1)) \
-            .translate((b[0] - 1, b[1] - 1, b[2] - 1))
+        cortador = cortador_apendice(a)
         pieza = cm ^ cortador
         if pieza.is_empty():
             continue

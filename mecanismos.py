@@ -237,10 +237,16 @@ def construir(malla: trimesh.Trimesh, piezas: list, modo: str = "montada",
     res = Mecanismo()
     cuerpo = _a_manifold(malla)
     moviles = []
+    apendices = []
+    if any(p.tipo == "bisagra" for p in piezas):
+        import formas
+        for a in formas.detectar(malla):
+            _, vuelta = formas.marco(a)
+            apendices.append((a, formas.cortador_apendice(a).transform(vuelta), vuelta))
     for p in piezas:
         lo, hi = np.minimum(p.caja_min, p.caja_max), np.maximum(p.caja_min, p.caja_max)
         if p.tipo == "bisagra":
-            corte = _cortar_articulacion(cuerpo, p, lo, hi, holgura, res)
+            corte = _cortar_articulacion(cuerpo, p, lo, hi, holgura, res, apendices=apendices)
             if corte is None:
                 res.avisos.append(f"{p.nombre}: la caja no contiene nada del modelo; se omite.")
                 continue
@@ -299,7 +305,7 @@ def _cerca_de(trozos, punto):
     return min(trozos, key=distancia)
 
 
-def _cortar_articulacion(cuerpo, p, lo, hi, holgura, res, L=400.0):
+def _cortar_articulacion(cuerpo, p, lo, hi, holgura, res, L=400.0, apendices=()):
     """Separa una pieza de bisagra con un corte que le deja girar sin chocar: la
     superficie de unión tiene que ser de revolución alrededor del eje.
 
@@ -334,21 +340,47 @@ def _cortar_articulacion(cuerpo, p, lo, hi, holgura, res, L=400.0):
         v = np.cross(base, u)
         normales = [base] + [np.cos(np.radians(g)) * base + np.sin(np.radians(g)) *
                              (np.cos(f) * u + np.sin(f) * v)
-                             for g in (12, 24, 36) for f in np.linspace(0, 2 * np.pi, 8, endpoint=False)]
+                             for g in (15, 30) for f in np.linspace(0, 2 * np.pi, 8, endpoint=False)]
         # Zona amplia: si se recortara justo en la caja, en su borde la sección
         # parecería mínima (falso cuello).
-        zona = cuerpo ^ _caja(lo - 15.0, hi + 15.0)
+        # Zona de la pieza: la caja ensanchada, y hacia el cuerpo un poco más para
+        # ver dónde empieza (el salto de sección).
+        hacia_cuerpo = -base
+        ext_lo = np.where(hacia_cuerpo < -0.5, 10.0, 3.0)
+        ext_hi = np.where(hacia_cuerpo > 0.5, 10.0, 3.0)
+        zona = cuerpo ^ _caja(lo - ext_lo, hi + ext_hi)
+        esquinas = np.array([[x, y, z] for x in (lo[0], hi[0]) for y in (lo[1], hi[1])
+                             for z in (lo[2], hi[2])])
+        en_caja = (cuerpo ^ _caja(lo, hi)).volume()
         mejor = None
         for n in normales:
             ida, _ = _marco_plano(piv, n)
             r = zona.transform(ida)
-            for desp in np.arange(-4.0, 4.01, 0.5):
-                area = r.slice(float(desp)).area()
-                if area <= 0:
+            r_caja = (cuerpo ^ _caja(lo, hi)).transform(ida)
+            punta = float(((esquinas - piv) @ n).max())
+            niveles = np.arange(punta - 0.5, -8.0, -0.5)        # de la punta hacia el cuerpo
+            areas = np.array([r.slice(float(z)).area() for z in niveles])
+            corte = None
+            for k in range(4, len(niveles)):
+                previas = areas[max(0, k - 6):k]
+                previas = previas[previas > 0]
+                if len(previas) and niveles[k] < 6.0 and areas[k] > 2.2 * previas.min():
+                    corte = k - 1          # justo antes de que la sección salte al cuerpo
+                    break
+            if corte is None:              # sin salto claro: la sección más fina cerca del pivote
+                cerca = np.where(np.abs(niveles) <= 4.0)[0]
+                cerca = [k for k in cerca if areas[k] > 0]
+                if not cerca:
                     continue
-                coste = area * (1 + 0.04 * abs(desp)) * (1 + 0.3 * (1 - n @ base))
-                if mejor is None or coste < mejor[0]:
-                    mejor = (coste, n, desp)
+                corte = min(cerca, key=lambda k: areas[k])
+            # El corte debe dejar del lado de la pieza casi toda la pieza (un plano
+            # que corta la cola de lado deja solo un trozo).
+            caja_n = np.array([r_caja.slice(float(z)).area() for z in niveles[:corte + 1]])
+            if caja_n.sum() * 0.5 < 0.7 * en_caja:
+                continue
+            coste = areas[corte] * (1 + 1.5 * (1 - n @ base))
+            if mejor is None or coste < mejor[0]:
+                mejor = (coste, n, float(niveles[corte]) - 0.25)
         if mejor is None:
             return None
         _, n, desp = mejor
@@ -358,10 +390,8 @@ def _cortar_articulacion(cuerpo, p, lo, hi, holgura, res, L=400.0):
         seccion = zona.transform(ida).slice(0.0)
         partes = [np.asarray(q) for q in seccion.to_polygons() if len(q) >= 3]
         if partes:
-            def centro(q):
-                return q.mean(0)
-            cerca = min(partes, key=lambda q: np.linalg.norm(centro(q)))
-            c2 = centro(cerca)
+            cerca = min(partes, key=lambda q: np.linalg.norm(q.mean(0)))
+            c2 = cerca.mean(0)
             if np.linalg.norm(c2) < 12:
                 p0 = vuelta[:, :3] @ np.array([c2[0], c2[1], 0.0]) + vuelta[:, 3]
         lado = cuerpo ^ semiespacio(p0, n, h2) ^ _caja(lo - 6.0, hi + 6.0)
@@ -387,13 +417,21 @@ def _cortar_articulacion(cuerpo, p, lo, hi, holgura, res, L=400.0):
     # apoyarse: se prueba el pivote y, si no, puntos cercanos.
     d = hacia - (hacia @ eje) * eje
     d /= np.linalg.norm(d)
+    zona = None
+    # Si la división automática encontró este apéndice (una pata entera hasta donde
+    # se funde con el cuerpo), se usa su forma y su corte en vez de la caja.
+    apendice = _apendice_de(cuerpo, lo, hi, apendices, eje)
+    if apendice is not None:
+        zona, d, piv = apendice
+        res.avisos.append(f"{p.nombre}: se separa la pieza entera hasta donde se une al cuerpo.")
     e = np.cross(eje, d)
+    e /= np.linalg.norm(e)
     candidatos = [piv] + [piv + i * d + j * e for i in np.arange(-4.5, 4.6, 1.5)
                           for j in np.arange(-4.5, 4.6, 1.5) if i or j]
     candidatos = sorted(candidatos, key=lambda q: np.linalg.norm(q - piv))
     primero = None
     for q in candidatos:
-        corte = _hombro(cuerpo, p, lo, hi, holgura, q, eje, d, e, L)
+        corte = _hombro(cuerpo, p, lo, hi, holgura, q, eje, d, e, L, zona)
         if corte is None:
             continue
         primero = primero or (corte, q)
@@ -426,9 +464,49 @@ def _tiene_apoyo(hija, cuerpo, punto, eje, holgura):
                for t in _intervalos(cuerpo.transform(ida)))
 
 
-def _hombro(cuerpo, p, lo, hi, holgura, piv, eje, d, e, L):
-    """Corte de hombro con el pivote `piv`: (pieza, cuerpo, radio) o None."""
+def _apendice_de(cuerpo, lo, hi, apendices, eje):
+    """El apéndice detectado (formas.py) que corresponde a la caja de la IA:
+    (zona del cortador, dirección hacia la punta, centro del corte) o None."""
+    import formas
+
+    en_caja = (cuerpo ^ _caja(lo, hi)).volume()
+    mejor = None
+    for a, cortador, vuelta in apendices:
+        d = np.asarray(formas.DIRECCIONES[a.direccion], float)
+        if abs(d @ eje) > 0.5:          # el eje debe cruzar la pieza
+            continue
+        trozos = (cuerpo ^ cortador).decompose()
+        if not trozos:
+            continue
+        pieza = max(trozos, key=lambda t: t.volume())
+        v = pieza.volume()
+        dentro = (pieza ^ _caja(lo - 2.0, hi + 2.0)).volume()
+        if dentro < 0.6 * v or dentro < 0.4 * en_caja:
+            continue
+        if mejor is None or dentro > mejor[0]:
+            mejor = (dentro, a, cortador, vuelta, pieza)
+    if mejor is None:
+        return None
+    _, a, cortador, vuelta, pieza = mejor
+    d = np.asarray(formas.DIRECCIONES[a.direccion], float)
+    # Centro de la sección de la pieza junto al corte.
+    ida = np.linalg.inv(np.vstack([vuelta, [0, 0, 0, 1]]))[:3]
+    seccion = pieza.transform(ida).slice(float(a.corte) - 0.3)
+    puntos = [np.asarray(q) for q in seccion.to_polygons() if len(q) >= 3]
+    if not puntos:
+        return None
+    c2 = max(puntos, key=len).mean(0)
+    centro = vuelta[:, :3] @ np.array([c2[0], c2[1], a.corte]) + vuelta[:, 3]
+    return cortador, d, centro
+
+
+def _hombro(cuerpo, p, lo, hi, holgura, piv, eje, d, e, L, zona=None):
+    """Corte de hombro con el pivote `piv`: (pieza, cuerpo, radio) o None. `zona`
+    limita lo que cuelga (por defecto, la caja de la IA algo ensanchada)."""
     import manifold3d as m3d
+
+    if zona is None:
+        zona = _caja(lo - 2.0, hi + 2.0)
 
     h2 = holgura / 2
 
@@ -436,7 +514,7 @@ def _hombro(cuerpo, p, lo, hi, holgura, piv, eje, d, e, L):
         _, vuelta = _marco_plano(punto, normal)
         return _caja(np.array([-L, -L, desde]), np.array([L, L, L])).transform(vuelta)
 
-    colgante = cuerpo ^ semiespacio(piv, d, h2) ^ _caja(lo - 2.0, hi + 2.0)
+    colgante = cuerpo ^ semiespacio(piv, d, h2) ^ zona
     trozos = colgante.decompose()
     if not trozos:
         return None
@@ -451,7 +529,7 @@ def _hombro(cuerpo, p, lo, hi, holgura, piv, eje, d, e, L):
         ancho = float(np.ptp(p3 @ e))
     else:
         ancho = 6.0
-    radio = float(np.clip(0.5 * ancho, 2.5, 10.0))
+    radio = float(np.clip(0.5 * ancho, 2.5, 6.0))
     # Tramo a lo largo del eje: el de la pieza que cuelga.
     vb = np.asarray(colg.to_mesh().vert_properties)[:, :3]
     t = (vb - piv) @ eje
@@ -461,7 +539,7 @@ def _hombro(cuerpo, p, lo, hi, holgura, piv, eje, d, e, L):
     def cilindro(r, a, b):
         return m3d.Manifold.cylinder(b - a, r, r, 64).translate((0, 0, a)).transform(vuelta_a)
 
-    region = cilindro(radio - h2, t0, t1) + (semiespacio(piv, d, h2) ^ _caja(lo - 2.0, hi + 2.0))
+    region = cilindro(radio - h2, t0, t1) + (semiespacio(piv, d, h2) ^ zona)
     trozos = (cuerpo ^ region).decompose()
     if not trozos:
         return None
@@ -698,7 +776,8 @@ def _eje(p: PiezaMovil, hija, cuerpo, modo, holgura, diametro, res):
         c = c - cil(ini - 0.2, fin + 0.2, r + 0.05)          # a presión en el cuerpo
         largo = fin - ini
         res.pasadores.append(_a_trimesh(m3d.Manifold.cylinder(largo, r, r, 40)))
-        res.avisos.append(f"{p.nombre}: pasador suelto de {2 * r:.1f} x {largo:.1f} mm.")
+        res.avisos.append(f"{p.nombre}: pasador suelto de {2 * r:.1f} x {largo:.1f} mm." +
+                          (" Muy corto para sujetar: mejor en modo montada." if largo < 4 else ""))
         return h.transform(vuelta), c.transform(vuelta)
 
     # Montada: el pasador sale del cuerpo y atraviesa la pieza con holgura.

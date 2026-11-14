@@ -184,12 +184,13 @@ giran y un brazo que lanza, un cofre con tapa, una mandíbula...
      la pieza gira alrededor con holgura.
    - *Separadas*: agujeros y pasadores sueltos (a presión en el cuerpo).
    Cortes que dejan girar sin chocar (la unión es de revolución alrededor del eje):
-   - *Patas, brazos, mandíbulas* (eje cruzado con la pieza): articulación de
-     hombro, un disco alrededor del eje más lo que cuelga; la parte de la pata
-     pegada al costado se va con la pata.
-   - *Cabeza, cola* (eje a lo largo de la pieza): plano por el cuello, el de menor
-     sección cerca del pivote, que puede ir inclinado (más bajo por la barbilla);
-     la pieza gira alrededor de la perpendicular al corte.
+   - *Patas, brazos* (eje cruzado con la pieza): la pieza entera hasta donde se
+     funde con el cuerpo (la misma detección que la división automática) más un
+     disco de hombro alrededor del eje.
+   - *Cabeza, cola* (eje a lo largo de la pieza): se sigue la pieza desde la punta
+     y se corta justo antes de que la sección salte al cuerpo (bajo el cuello, en
+     la base de la cola); el plano puede ir inclinado y la pieza gira alrededor
+     de su perpendicular.
    - *Ruedas*: su caja, ajustada si se queda corta.
    El pasador se coloca donde tiene cuerpo en el que apoyarse; en piezas finas se
    añade un collarín corto y el pasador solo entra en él. Todo se indica en el informe.
