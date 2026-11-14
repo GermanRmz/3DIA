@@ -239,6 +239,14 @@ def construir(malla: trimesh.Trimesh, piezas: list, modo: str = "montada",
     moviles = []
     for p in piezas:
         lo, hi = np.minimum(p.caja_min, p.caja_max), np.maximum(p.caja_min, p.caja_max)
+        if p.tipo == "bisagra":
+            corte = _cortar_articulacion(cuerpo, p, lo, hi, holgura, res)
+            if corte is None:
+                res.avisos.append(f"{p.nombre}: la caja no contiene nada del modelo; se omite.")
+                continue
+            hija, cuerpo = corte
+            moviles.append((p, hija))
+            continue
         lo, hi = _ajustar_caja(cuerpo, lo, hi, p, res, holgura)
         hija = _elegir_hija(cuerpo, lo, hi, holgura, np.asarray(p.pivote, float))
         if hija is None:
@@ -261,7 +269,7 @@ def construir(malla: trimesh.Trimesh, piezas: list, modo: str = "montada",
                                           m3d.OpType.Add)
         res.partes.append(animacion.Articulacion(
             p.nombre, _a_trimesh(hija), "giro" if p.tipo == "giro" else "bisagra",
-            tuple(p.pivote), EJES[p.eje], p.angulo_min, p.angulo_max,
+            tuple(p.pivote), tuple(_vector(p)), p.angulo_min, p.angulo_max,
             movimiento=p.movimiento, fase=float(p.fase), color=COLORES[i % len(COLORES)]))
     trozos = sorted(cuerpo.decompose(), key=lambda t: -t.volume())
     cuerpo = m3d.Manifold.batch_boolean([t for t in trozos if t.volume() > 0.002 * trozos[0].volume()],
@@ -269,6 +277,203 @@ def construir(malla: trimesh.Trimesh, piezas: list, modo: str = "montada",
     res.partes.insert(0, animacion.Articulacion("cuerpo", _a_trimesh(cuerpo), "fija",
                                                 color=(210, 210, 210)))
     return res
+
+
+def _vector(p):
+    """Dirección del eje: la del corte inclinado si se calculó, si no la de la IA."""
+    v = getattr(p, "vector", None)
+    return tuple(v) if v is not None else EJES[p.eje]
+
+
+def _en_marco(solido_marco, vuelta):
+    return solido_marco.transform(vuelta)
+
+
+def _cerca_de(trozos, punto):
+    """El trozo más cercano a `punto` (de los que no son migas)."""
+    trozos = [t for t in trozos if t.volume() > 0.02 * max(x.volume() for x in trozos)]
+
+    def distancia(t):
+        b = np.asarray(t.bounding_box())
+        return np.linalg.norm(np.maximum(0, np.maximum(b[:3] - punto, punto - b[3:])))
+    return min(trozos, key=distancia)
+
+
+def _cortar_articulacion(cuerpo, p, lo, hi, holgura, res, L=400.0):
+    """Separa una pieza de bisagra con un corte que le deja girar sin chocar: la
+    superficie de unión tiene que ser de revolución alrededor del eje.
+
+    - Eje a lo largo de la pieza (cabeza que gira, cola): plano por el cuello, el
+      de menor sección cerca del pivote, que puede ir inclinado; la pieza gira
+      alrededor de la perpendicular a ese plano.
+    - Eje cruzado con la pieza (pata, brazo, mandíbula): un disco alrededor del eje
+      (como un hombro) más lo que cuelga más allá del pivote. Así la parte de la
+      pata pegada al costado se va con la pata.
+    Devuelve (pieza, cuerpo sin la pieza y con la holgura) o None."""
+    import manifold3d as m3d
+
+    lo, hi = np.asarray(lo, float), np.asarray(hi, float)
+    piv = np.asarray(p.pivote, float)
+    eje = np.asarray(EJES[p.eje], float)
+    hacia = (lo + hi) / 2 - piv                       # del pivote hacia la pieza
+    if np.linalg.norm(hacia) < 1e-6 or (cuerpo ^ _caja(lo, hi)).is_empty():
+        return None
+    h2 = holgura / 2
+
+    def semiespacio(punto, normal, desde):
+        ida, vuelta = _marco_plano(punto, normal)
+        return _caja(np.array([-L, -L, desde]), np.array([L, L, L])).transform(vuelta)
+
+    coseno = abs(hacia @ eje) / np.linalg.norm(hacia)
+    if coseno > 0.64:
+        # --- Corte plano por el cuello (eje a lo largo de la pieza) ---
+        base = eje * np.sign(hacia @ eje)
+        aux = np.array([1.0, 0, 0]) if abs(base[0]) < 0.9 else np.array([0, 1.0, 0])
+        u = np.cross(base, aux)
+        u /= np.linalg.norm(u)
+        v = np.cross(base, u)
+        normales = [base] + [np.cos(np.radians(g)) * base + np.sin(np.radians(g)) *
+                             (np.cos(f) * u + np.sin(f) * v)
+                             for g in (12, 24, 36) for f in np.linspace(0, 2 * np.pi, 8, endpoint=False)]
+        # Zona amplia: si se recortara justo en la caja, en su borde la sección
+        # parecería mínima (falso cuello).
+        zona = cuerpo ^ _caja(lo - 15.0, hi + 15.0)
+        mejor = None
+        for n in normales:
+            ida, _ = _marco_plano(piv, n)
+            r = zona.transform(ida)
+            for desp in np.arange(-4.0, 4.01, 0.5):
+                area = r.slice(float(desp)).area()
+                if area <= 0:
+                    continue
+                coste = area * (1 + 0.04 * abs(desp)) * (1 + 0.3 * (1 - n @ base))
+                if mejor is None or coste < mejor[0]:
+                    mejor = (coste, n, desp)
+        if mejor is None:
+            return None
+        _, n, desp = mejor
+        p0 = piv + n * desp
+        # El pasador, en el centro del cuello (el pivote de la IA puede caer al borde).
+        ida, vuelta = _marco_plano(p0, n)
+        seccion = zona.transform(ida).slice(0.0)
+        partes = [np.asarray(q) for q in seccion.to_polygons() if len(q) >= 3]
+        if partes:
+            def centro(q):
+                return q.mean(0)
+            cerca = min(partes, key=lambda q: np.linalg.norm(centro(q)))
+            c2 = centro(cerca)
+            if np.linalg.norm(c2) < 12:
+                p0 = vuelta[:, :3] @ np.array([c2[0], c2[1], 0.0]) + vuelta[:, 3]
+        lado = cuerpo ^ semiespacio(p0, n, h2) ^ _caja(lo - 6.0, hi + 6.0)
+        trozos = lado.decompose()
+        if not trozos:
+            return None
+        hija = _cerca_de(trozos, p0 + 3 * n)
+        b = np.asarray(hija.bounding_box())
+        ida, vuelta = _marco_plano(p0, n)
+        rendija = _caja(np.array([-L, -L, -h2]), np.array([L, L, h2])).transform(vuelta) ^ \
+            _caja(b[:3] - 1, b[3:] + 1)
+        cuerpo = cuerpo - hija - rendija
+        inclinado = np.degrees(np.arccos(np.clip(n @ base, -1, 1)))
+        p.pivote = [round(float(x), 2) for x in p0]
+        p.vector = [round(float(x), 4) for x in n * np.sign(n @ eje)]
+        res.avisos.append(f"{p.nombre}: corte por el cuello" +
+                          (f", inclinado {inclinado:.0f}°" if inclinado > 1 else "") +
+                          "; gira alrededor de la perpendicular al corte.")
+        return hija, cuerpo
+
+    # --- Corte de hombro: disco alrededor del eje + lo que cuelga ---
+    # El pasador debe ir en el centro del disco y tener cuerpo al lado donde
+    # apoyarse: se prueba el pivote y, si no, puntos cercanos.
+    d = hacia - (hacia @ eje) * eje
+    d /= np.linalg.norm(d)
+    e = np.cross(eje, d)
+    candidatos = [piv] + [piv + i * d + j * e for i in np.arange(-4.5, 4.6, 1.5)
+                          for j in np.arange(-4.5, 4.6, 1.5) if i or j]
+    candidatos = sorted(candidatos, key=lambda q: np.linalg.norm(q - piv))
+    primero = None
+    for q in candidatos:
+        corte = _hombro(cuerpo, p, lo, hi, holgura, q, eje, d, e, L)
+        if corte is None:
+            continue
+        primero = primero or (corte, q)
+        if _tiene_apoyo(corte[0], corte[1], q, eje, holgura):
+            break
+    else:
+        if primero is None:
+            return None
+        corte, q = primero
+    hija, cuerpo, radio = corte
+    if np.linalg.norm(q - piv) > 0.1:
+        res.avisos.append(f"{p.nombre}: pivote movido {np.linalg.norm(q - piv):.1f} mm para que "
+                          "el pasador apoye en el cuerpo.")
+    p.pivote = [round(float(x), 2) for x in q]
+    res.avisos.append(f"{p.nombre}: articulación de hombro de {2 * radio:.1f} mm alrededor del eje "
+                      "(la pieza se lleva la parte pegada al cuerpo).")
+    return hija, cuerpo
+
+
+def _tiene_apoyo(hija, cuerpo, punto, eje, holgura):
+    ida, _ = _marco_plano(punto, eje)
+    th = _intervalos(hija.transform(ida))
+    if not th:
+        return False
+    h0, h1 = min(th, key=lambda t: abs((t[0] + t[1]) / 2))
+    if h0 > 0.5 or h1 < -0.5:
+        return False
+    cerca = 3 * holgura + 2
+    return any((t[1] <= h0 + 0.1 and h0 - t[1] < cerca) or (t[0] >= h1 - 0.1 and t[0] - h1 < cerca)
+               for t in _intervalos(cuerpo.transform(ida)))
+
+
+def _hombro(cuerpo, p, lo, hi, holgura, piv, eje, d, e, L):
+    """Corte de hombro con el pivote `piv`: (pieza, cuerpo, radio) o None."""
+    import manifold3d as m3d
+
+    h2 = holgura / 2
+
+    def semiespacio(punto, normal, desde):
+        _, vuelta = _marco_plano(punto, normal)
+        return _caja(np.array([-L, -L, desde]), np.array([L, L, L])).transform(vuelta)
+
+    colgante = cuerpo ^ semiespacio(piv, d, h2) ^ _caja(lo - 2.0, hi + 2.0)
+    trozos = colgante.decompose()
+    if not trozos:
+        return None
+    colg = _cerca_de(trozos, piv + 3 * d)
+    # Radio del hombro: media anchura de la pieza justo debajo del pivote.
+    ida_d, vuelta_d = _marco_plano(piv + 2.5 * d, d)
+    seccion = colg.transform(ida_d).slice(0.0)
+    puntos = [np.asarray(q) for q in seccion.to_polygons()]
+    if puntos:
+        pts = np.vstack(puntos)
+        p3 = pts @ vuelta_d[:, :2].T                  # direcciones en 3D (sin traslación)
+        ancho = float(np.ptp(p3 @ e))
+    else:
+        ancho = 6.0
+    radio = float(np.clip(0.5 * ancho, 2.5, 10.0))
+    # Tramo a lo largo del eje: el de la pieza que cuelga.
+    vb = np.asarray(colg.to_mesh().vert_properties)[:, :3]
+    t = (vb - piv) @ eje
+    t0, t1 = float(t.min()), float(t.max())
+    ida_a, vuelta_a = _marco_plano(piv, eje)
+
+    def cilindro(r, a, b):
+        return m3d.Manifold.cylinder(b - a, r, r, 64).translate((0, 0, a)).transform(vuelta_a)
+
+    region = cilindro(radio - h2, t0, t1) + (semiespacio(piv, d, h2) ^ _caja(lo - 2.0, hi + 2.0))
+    trozos = (cuerpo ^ region).decompose()
+    if not trozos:
+        return None
+    marca = m3d.Manifold.sphere(1.0, 12).translate(tuple(piv))
+    con = [x for x in trozos if not (x ^ marca).is_empty()]
+    hija = max(con, key=lambda x: x.volume()) if con else _cerca_de(trozos, piv)
+    b = np.asarray(hija.bounding_box())
+    exterior = cilindro(radio + h2, t0 - holgura, t1 + holgura) + \
+        (semiespacio(piv, d, -h2) ^ _caja(b[:3] - 0.5, b[3:] + 0.5))
+    cuerpo = cuerpo - hija - (exterior - hija)
+    return hija, cuerpo, radio
+
 
 
 def _elegir_hija(cuerpo, lo, hi, holgura, pivote):
@@ -372,32 +577,11 @@ def _ajustar_caja(cuerpo, lo, hi, p, res, holgura, pasos=48):
     return lo, hi
 
 
-def _eje(p: PiezaMovil, hija, cuerpo, modo, holgura, diametro, res, probar_ejes=True):
+def _eje(p: PiezaMovil, hija, cuerpo, modo, holgura, diametro, res):
     """Pasador a lo largo del eje de la pieza, por su pivote."""
     import manifold3d as m3d
 
-    if probar_ejes:
-        pivote, eje, n = list(p.pivote), p.eje, len(res.avisos)
-        h, c = _eje(p, hija, cuerpo, modo, holgura, diametro, res, False)
-        if not res.avisos[-1:] or "no hay cuerpo" not in res.avisos[-1] or p.tipo != "bisagra":
-            return h, c
-        # Con ese eje el pasador no tiene dónde apoyarse (una cola que sale del lomo
-        # no tiene cuerpo a los lados): se prueban los otros ejes.
-        for otro in "xyz".replace(eje, ""):
-            prueba = Mecanismo()
-            p.eje, p.pivote = otro, list(pivote)
-            h, c = _eje(p, hija, cuerpo, modo, holgura, diametro, prueba, False)
-            if not any("no hay cuerpo" in a or "no pasa" in a for a in prueba.avisos):
-                del res.avisos[n:]
-                res.avisos.append(f"{p.nombre}: con el eje {eje.upper()} no había dónde apoyarlo; "
-                                  f"gira sobre {otro.upper()}.")
-                res.avisos += prueba.avisos
-                res.pasadores += prueba.pasadores
-                return h, c
-        p.eje, p.pivote = eje, pivote
-        return hija, cuerpo
-
-    ida, vuelta = _marco_plano(p.pivote, EJES[p.eje])
+    ida, vuelta = _marco_plano(p.pivote, _vector(p))
     h, c = hija.transform(ida), cuerpo.transform(ida)
     tramos_h = [t for t in _intervalos(h) if t[0] <= 0.5 and t[1] >= -0.5] or _intervalos(h)
     if not tramos_h:
@@ -413,7 +597,7 @@ def _eje(p: PiezaMovil, hija, cuerpo, modo, holgura, diametro, res, probar_ejes=
                 res.avisos.append(f"{p.nombre}: pivote movido {np.linalg.norm(centro):.1f} mm para "
                                   "que el eje atraviese la pieza.")
                 p.pivote = [round(float(x), 2) for x in nuevo]
-                ida, vuelta = _marco_plano(p.pivote, EJES[p.eje])
+                ida, vuelta = _marco_plano(p.pivote, _vector(p))
                 h, c = hija.transform(ida), cuerpo.transform(ida)
                 tramos_h = [t for t in _intervalos(h) if t[0] <= 0.5 and t[1] >= -0.5] or \
                     _intervalos(h)
@@ -443,7 +627,7 @@ def _eje(p: PiezaMovil, hija, cuerpo, modo, holgura, diametro, res, probar_ejes=
                    if 0 < dx * dx + dy * dy <= 81]
         for dx, dy in sorted(rejilla, key=lambda d: d[0] ** 2 + d[1] ** 2):
             nuevo = vuelta[:, :3] @ np.array([dx, dy, 0.0]) + vuelta[:, 3]
-            ida2, vuelta2 = _marco_plano(nuevo, EJES[p.eje])
+            ida2, vuelta2 = _marco_plano(nuevo, _vector(p))
             h2 = hija.transform(ida2)
             tramos2 = _intervalos(h2)
             if not tramos2:
@@ -469,9 +653,10 @@ def _eje(p: PiezaMovil, hija, cuerpo, modo, holgura, diametro, res, probar_ejes=
 
     # Radio: lo que quepa en la sección de la pieza alrededor del eje, con pared.
     pared = 1.2
+    buje = False
     seccion = h.slice((h0 + h1) / 2)
     r = diametro / 2 if diametro > 0 else 2.0
-    while r > 1.25 and (seccion.offset(-pared, m3d.JoinType.Round) ^ m3d.CrossSection.circle(
+    while r > 1.5 and (seccion.offset(-pared, m3d.JoinType.Round) ^ m3d.CrossSection.circle(
             r + holgura, 32)).area() < 0.95 * np.pi * (r + holgura) ** 2:
         r -= 0.25
     if (seccion.offset(-pared, m3d.JoinType.Round) ^ m3d.CrossSection.circle(r + holgura, 32)).area() \
@@ -482,9 +667,25 @@ def _eje(p: PiezaMovil, hija, cuerpo, modo, holgura, diametro, res, probar_ejes=
         r = diametro / 2 if diametro > 0 else 2.0
         lo, hi = np.minimum(p.caja_min, p.caja_max), np.maximum(p.caja_min, p.caja_max)
         dentro = _caja(lo + holgura, hi - holgura).transform(ida)
-        h = h + (cil(h0, h1, r + holgura + pared) ^ dentro)
+        # Solo en el tramo junto al cuerpo (en una cola fina, no a todo lo largo).
+        buje = True
+        largo_buje = 2 * pared + 2.6          # collarín corto, lo justo para el pasador
+        if abajo:
+            b0, b1 = h0, min(h1, h0 + largo_buje)
+        else:
+            b0, b1 = max(h0, h1 - largo_buje), h1
+        h = h + (cil(b0, b1, r + holgura + pared) ^ dentro)
         res.avisos.append(f"{p.nombre}: se añadió un buje de {2 * (r + holgura + pared):.1f} mm "
                           "alrededor del eje para el pasador.")
+
+    if bool(abajo) != bool(arriba):
+        # Apoyado por un solo lado: el pasador entra en la pieza solo lo necesario
+        # (el collarín, o 10 mm), no a lo largo de toda una cola o una cabeza.
+        penetra = (b1 - b0) if buje else 10.0
+        if abajo:
+            h1 = min(h1, h0 + penetra)
+        else:
+            h0 = max(h0, h1 - penetra)
 
     entra = 3.0
     z_ini = abajo[-1][1] - min(entra, abajo[-1][1] - abajo[-1][0]) if abajo else None
