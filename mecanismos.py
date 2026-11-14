@@ -239,19 +239,18 @@ def construir(malla: trimesh.Trimesh, piezas: list, modo: str = "montada",
     moviles = []
     for p in piezas:
         lo, hi = np.minimum(p.caja_min, p.caja_max), np.maximum(p.caja_min, p.caja_max)
-        lo, hi = _recortar_caja(cuerpo, lo, hi, p, res)
-        interior = cuerpo ^ _caja(lo + holgura, hi - holgura)
-        trozos = sorted(interior.decompose(), key=lambda t: -t.volume())
-        if not trozos:
+        lo, hi = _ajustar_caja(cuerpo, lo, hi, p, res, holgura)
+        hija = _elegir_hija(cuerpo, lo, hi, holgura, np.asarray(p.pivote, float))
+        if hija is None:
             res.avisos.append(f"{p.nombre}: la caja no contiene nada del modelo; se omite.")
             continue
-        marca = m3d.Manifold.sphere(1.5, 12).translate(tuple(p.pivote))
-        con_pivote = [t for t in trozos if not (t ^ marca).is_empty()]
-        hija = (con_pivote or trozos)[0]
-        # Se quita del cuerpo la caja completa alrededor de la pieza; la diferencia
-        # con la caja interior deja una holgura en todas sus caras.
+        # Se quita del cuerpo la pieza y, alrededor de ella, la capa de holgura de las
+        # caras de la caja (donde la pieza se unía al resto). Lo demás que hubiera en
+        # la caja (otra pieza, la barriga) se queda en el cuerpo.
         b = np.asarray(hija.bounding_box())
-        cuerpo = cuerpo - (_caja(lo, hi) ^ _caja(b[:3] - holgura - 0.5, b[3:] + holgura + 0.5))
+        capa = (_caja(lo, hi) - _caja(lo + holgura, hi - holgura)) ^ \
+            _caja(b[:3] - holgura - 0.5, b[3:] + holgura + 0.5)
+        cuerpo = cuerpo - hija - capa
         moviles.append((p, hija))
 
     for i, (p, hija) in enumerate(moviles):
@@ -272,69 +271,104 @@ def construir(malla: trimesh.Trimesh, piezas: list, modo: str = "montada",
     return res
 
 
-def _recortar_caja(cuerpo, lo, hi, p, res, pasos=48):
-    """Si una cara de la caja corta algo mucho más ancho que la pieza (la caja de una
-    pata que se mete en la barriga), la acerca hasta la sección más estrecha cercana:
-    el "cuello" donde la pieza se une al cuerpo. Después mete el pivote en la caja."""
+def _elegir_hija(cuerpo, lo, hi, holgura, pivote):
+    """Trozo del modelo dentro de la caja (encogida por la holgura) que contiene el
+    pivote o, si ninguno lo contiene, el más cercano a él."""
+    import manifold3d as m3d
+
+    trozos = (cuerpo ^ _caja(lo + holgura, hi - holgura)).decompose()
+    if not trozos:
+        return None
+    marca = m3d.Manifold.sphere(1.5, 12).translate(tuple(pivote))
+    con_pivote = [t for t in trozos if not (t ^ marca).is_empty()]
+    if con_pivote:
+        return max(con_pivote, key=lambda t: t.volume())
+
+    def distancia(t):
+        b = np.asarray(t.bounding_box())
+        return np.linalg.norm(np.maximum(0, np.maximum(b[:3] - pivote, pivote - b[3:])))
+    grandes = [t for t in trozos if t.volume() > 0.05 * max(x.volume() for x in trozos)]
+    return min(grandes, key=distancia)
+
+
+def _ajustar_caja(cuerpo, lo, hi, p, res, holgura, pasos=48):
+    """Corrige la caja de la IA:
+    - la cara de unión (la que toca el cuerpo, la más cercana al pivote) se acerca
+      a la sección más estrecha, sin pasar del pivote: así una pata no se lleva
+      la barriga;
+    - las demás caras, si cortan la pieza (caja demasiado justa), crecen hasta
+      abarcarla entera: así una cola fina no queda partida."""
     lo, hi = np.array(lo, float), np.array(hi, float)
-    interior = cuerpo ^ _caja(lo, hi)
-    if interior.is_empty():
-        return lo, hi
-    for a in range(3):
-        if a == "xyz".index(p.eje) and p.tipo == "giro":
-            continue                     # a lo largo del eje de una rueda no se recorta
-        # Matriz que lleva el eje `a` a Z para cortar en rodajas.
+    piv = np.asarray(p.pivote, float)
+
+    def fuera(a, lado, lo, hi, grosor=1.5):
+        f_lo, f_hi = lo.copy(), hi.copy()
+        if lado == 0:
+            f_lo[a], f_hi[a] = lo[a] - grosor, lo[a]
+        else:
+            f_lo[a], f_hi[a] = hi[a], hi[a] + grosor
+        return (cuerpo ^ _caja(f_lo, f_hi)).volume()
+
+    caras = [(a, lado) for a in range(3) for lado in (0, 1)]
+    con_cuerpo = [(a, l) for a, l in caras if fuera(a, l, lo, hi) > 1.0]
+    union = min(con_cuerpo, key=lambda c: abs((lo if c[1] == 0 else hi)[c[0]] - piv[c[0]])) \
+        if con_cuerpo else None
+
+    # 1. Cara de unión: al cuello, si corta algo mucho más ancho que la pieza.
+    if union is not None:
+        a, lado = union
         orden = [(a + 1) % 3, (a + 2) % 3, a]
         m = np.zeros((3, 4))
         m[np.arange(3), orden] = 1.0
-        rodajas = interior.transform(m)
+        rodajas = (cuerpo ^ _caja(lo, hi)).transform(m)
         zs = np.linspace(lo[a], hi[a], pasos + 2)[1:-1]
         areas = np.array([rodajas.slice(float(z)).area() for z in zs])
-        if areas.max() <= 0:
-            continue
-        tipica = np.median(areas[areas > 0])
-        for lado in (0, 1):
-            serie = areas if lado == 0 else areas[::-1]
-            if serie[0] < 1.3 * tipica:  # la cara no corta nada ancho
-                continue
-            # Solo si al otro lado de la cara sigue habiendo cuerpo (no en un pie
-            # apoyado en el suelo, que simplemente es más ancho que la pata).
-            fuera_lo, fuera_hi = lo.copy(), hi.copy()
-            if lado == 0:
-                fuera_lo[a], fuera_hi[a] = lo[a] - 1.0, lo[a]
-            else:
-                fuera_lo[a], fuera_hi[a] = hi[a], hi[a] + 1.0
-            if (cuerpo ^ _caja(fuera_lo, fuera_hi)).volume() < 0.3 * serie[0]:
-                continue
-            tramo = serie[: int(pasos * 0.45)].copy()
-            if a != "xyz".index(p.eje):
-                # Nunca más allá del pivote: ahí está la articulación.
-                zz = (zs if lado == 0 else zs[::-1])[: len(tramo)]
-                piv = float(p.pivote[a])
-                tramo[(zz > piv - 1.5) if lado == 0 else (zz < piv + 1.5)] = 0
+        if lado == 1:
+            zs, areas = zs[::-1], areas[::-1]
+        if areas.max() > 0:
+            tipica = np.median(areas[areas > 0])
+            tramo = areas[: int(pasos * 0.45)].copy()
+            tramo[(zs[: len(tramo)] > piv[a] - 1.0) if lado == 0 else (zs[: len(tramo)] < piv[a] + 1.0)] = 0
             k = int(np.argmin(np.where(tramo > 0, tramo, np.inf)))
-            if not np.isfinite(tramo[k]) or tramo[k] > 0.6 * serie[0] or k == 0:
+            if areas[0] > 1.3 * tipica and np.isfinite(tramo[k]) and tramo[k] < 0.6 * areas[0] and k > 0:
+                antes = (lo if lado == 0 else hi)[a]
+                (lo if lado == 0 else hi)[a] = zs[k]
+                res.avisos.append(f"{p.nombre}: caja recortada en {'XYZ'[a]} de {antes:.1f} a "
+                                  f"{zs[k]:.1f} mm (no coge parte del cuerpo).")
+
+    # 2. Las demás caras crecen mientras corten la pieza.
+    hija = _elegir_hija(cuerpo, lo, hi, holgura, piv)
+    if hija is None:
+        return lo, hi
+    crecido = np.zeros((3, 2))
+    for _ in range(8):
+        cambio = False
+        b = np.asarray(hija.bounding_box())
+        for a, lado in caras:
+            if (a, lado) == union or crecido[a, lado] >= 4:
                 continue
-            z = (zs if lado == 0 else zs[::-1])[k]
-            antes = lo[a] if lado == 0 else hi[a]
+            borde = (lo[a] + holgura) if lado == 0 else (hi[a] - holgura)
+            if abs((b[a] if lado == 0 else b[a + 3]) - borde) > 0.3:
+                continue                       # la pieza no llega a esa cara
+            lo2, hi2 = lo.copy(), hi.copy()
             if lado == 0:
-                lo[a] = z
+                lo2[a] -= 2.0
             else:
-                hi[a] = z
-            res.avisos.append(f"{p.nombre}: caja recortada en {'XYZ'[a]} de {antes:.1f} a "
-                              f"{z:.1f} mm (no coge parte del cuerpo).")
-            interior = cuerpo ^ _caja(lo, hi)
-            rodajas = interior.transform(m)
-    # El pivote, dentro de la caja (salvo a lo largo de su eje, donde da igual).
-    piv = np.array(p.pivote, float)
-    eje = "xyz".index(p.eje)
-    for a in range(3):
-        if a != eje:
-            margen = min(1.5, (hi[a] - lo[a]) / 4)
-            piv[a] = np.clip(piv[a], lo[a] + margen, hi[a] - margen)
-    if np.linalg.norm(piv - np.asarray(p.pivote, float)) > 0.5:
-        res.avisos.append(f"{p.nombre}: pivote metido en la caja ({', '.join(f'{v:.1f}' for v in piv)}).")
-    p.pivote = [round(float(v), 2) for v in piv]
+                hi2[a] += 2.0
+            nueva = _elegir_hija(cuerpo, lo2, hi2, holgura, piv)
+            if nueva is None or nueva.volume() > 1.35 * hija.volume() + 5:
+                crecido[a, lado] = 99          # se metería en el cuerpo
+                continue
+            lo, hi, hija = lo2, hi2, nueva
+            crecido[a, lado] += 2.0
+            b = np.asarray(hija.bounding_box())
+            cambio = True
+        if not cambio:
+            break
+    for a, lado in caras:
+        if 0 < crecido[a, lado] < 99:
+            res.avisos.append(f"{p.nombre}: caja ampliada {crecido[a, lado]:.0f} mm en "
+                              f"{'-+'[lado]}{'XYZ'[a]} para no partir la pieza.")
     return lo, hi
 
 

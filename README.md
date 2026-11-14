@@ -183,11 +183,12 @@ giran y un brazo que lanza, un cofre con tapa, una mandíbula...
    - *Montada*: se imprime ya ensamblada (print-in-place); el eje sale del cuerpo y
      la pieza gira alrededor con holgura.
    - *Separadas*: agujeros y pasadores sueltos (a presión en el cuerpo).
-   Correcciones automáticas: si la caja se mete en el cuerpo (la de una pata que
-   coge barriga) se recorta por la sección más estrecha; si el pivote cae fuera o
-   el eje no toca el cuerpo se busca un punto cercano que sí; si con ese eje no hay
-   dónde apoyar el pasador se prueba otro (una cola que sale del lomo se menea
-   sobre Z); si la pieza es fina se le añade un buje; y si está entre dos
+   Correcciones automáticas: la cara de la caja que se une al cuerpo se recorta
+   por el cuello de la pieza (una pata no se lleva la barriga); las otras caras
+   crecen hasta 4 mm si la caja de la IA se quedó corta y partía la pieza (una
+   cola fina sale entera); si el pivote cae fuera o el eje no toca el cuerpo se
+   busca un punto cercano que sí; si con ese eje no hay dónde apoyar el pasador
+   se prueba otro; si la pieza es fina se le añade un buje; y si está entre dos
    laterales, el eje los cruza de lado a lado. Todo se indica en el informe.
 3. Descargas: `.glb` animado (Blender, visores web; las ruedas giran y el brazo
    sube y vuelve), `.zip` con un STL por pieza y los pasadores, y `.3mf`.
