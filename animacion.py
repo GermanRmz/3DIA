@@ -27,6 +27,8 @@ class Articulacion:
     angulo_min: float = 0.0      # grados (bisagra)
     angulo_max: float = 60.0
     vueltas: float = 1.0         # giro: vueltas por ciclo
+    movimiento: str = "lanzar"   # bisagra: "lanzar" (rápido y vuelve) u "oscilar" (vaivén)
+    fase: float = 0.0            # desfase en el ciclo (0-1), p. ej. patas alternas
     color: tuple = (200, 200, 200)
 
 
@@ -90,12 +92,15 @@ def exportar_glb(ruta: str, partes: list, duracion: float = 2.0, fotogramas: int
         if p.tipo == "fija" or p.nombre not in nodos:
             continue
         eje = (giro[:3, :3] @ np.asarray(p.eje, float))
-        t = np.linspace(0, 1, fotogramas)
+        t = (np.linspace(0, 1, fotogramas) + p.fase) % 1.0
         if p.tipo == "giro":
-            angulos = 360.0 * p.vueltas * t
-        else:  # bisagra: sube rápido (lanzamiento) y vuelve despacio
-            fase = np.where(t < 0.25, t / 0.25, 1 - (t - 0.25) / 0.75)
-            suave = 0.5 - 0.5 * np.cos(np.pi * fase)
+            angulos = 360.0 * p.vueltas * np.linspace(0, 1, fotogramas)
+        else:
+            if p.movimiento == "oscilar":   # vaivén suave (patas, cabeza, cola)
+                suave = 0.5 - 0.5 * np.cos(2 * np.pi * t)
+            else:                           # lanzar: sube rápido y vuelve despacio
+                fase = np.where(t < 0.25, t / 0.25, 1 - (t - 0.25) / 0.75)
+                suave = 0.5 - 0.5 * np.cos(np.pi * fase)
             angulos = p.angulo_min + (p.angulo_max - p.angulo_min) * suave
         cuats = np.array([_cuaternion(eje, a) for a in angulos], np.float32)
         acc_rot = accesor(cuats, g.VEC4)

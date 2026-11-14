@@ -44,10 +44,12 @@ ESQUEMA = {
                     "eje": {"type": "string", "enum": ["x", "y", "z"]},
                     "angulo_min": {"type": "number"},
                     "angulo_max": {"type": "number"},
+                    "movimiento": {"type": "string", "enum": ["lanzar", "oscilar"]},
+                    "fase": {"type": "number"},
                     "explicacion": {"type": "string"},
                 },
                 "required": ["nombre", "tipo", "caja_min", "caja_max", "pivote", "eje",
-                             "angulo_min", "angulo_max", "explicacion"],
+                             "angulo_min", "angulo_max", "movimiento", "fase", "explicacion"],
                 "additionalProperties": False,
             },
         },
@@ -56,29 +58,50 @@ ESQUEMA = {
     "additionalProperties": False,
 }
 
-INSTRUCCIONES = """Eres un ingeniero de mecanismos para impresión 3D. Te paso la imagen original \
-de un objeto y tres vistas ortográficas de su modelo 3D con cuadrícula en milímetros.
+INSTRUCCIONES = """Eres un ingeniero de mecanismos para impresión 3D y animación. Te paso la \
+imagen original de un objeto y tres vistas ortográficas de su modelo 3D con cuadrícula en \
+milímetros.
 
 Sistema de coordenadas (mm): Z hacia arriba, el frente del objeto mira hacia -Y.
-- Vista "frente": horizontal = X, vertical = Z.
-- Vista "lado": horizontal = Y, vertical = Z.
-- Vista "arriba": horizontal = X, vertical = Y.
+- Vista "frente": horizontal = X, vertical = Z (la izquierda de la imagen es -X).
+- Vista "lado": horizontal = Y, vertical = Z (el frente del objeto está a la izquierda, -Y).
+- Vista "arriba": horizontal = X, vertical = Y (el frente del objeto está abajo, -Y).
 Medidas del modelo: {medidas}.
 
-Identifica las piezas que en el objeto real se moverían para que funcione (por ejemplo \
-ruedas que giran sobre su eje, el brazo de una catapulta que bascula, una puerta, una \
-mandíbula, una hélice). Para cada una:
-- tipo: "giro" si da vueltas completas (ruedas, hélices), "bisagra" si oscila entre dos \
-ángulos (brazos, puertas, tapas).
-- caja_min y caja_max: [x, y, z] de una caja que contenga SOLO esa pieza, lo más ajustada \
-posible, sin incluir el cuerpo al que va unida (deja el eje o soporte fuera de la caja).
-- pivote: [x, y, z] del centro de la articulación (el centro del eje de la rueda, el eje \
-del brazo).
-- eje: el eje de giro, "x", "y" o "z".
-- angulo_min y angulo_max en grados para la bisagra (0 = posición del modelo; el signo \
-sigue la regla de la mano derecha sobre el eje positivo). Para "giro", 0 y 360.
+Identifica las piezas que en el objeto real se moverían: ruedas que giran sobre su eje, el \
+brazo de una catapulta, una puerta, una tapa, una mandíbula, una hélice; en animales, \
+robots o personajes: patas, cabeza, cola, brazos. Para cada una:
+- tipo: "giro" si da vueltas completas (ruedas, hélices), "bisagra" si va y viene entre \
+dos ángulos.
+- caja_min y caja_max: [x, y, z] de una caja que contenga SOLO esa pieza. La cara de la \
+caja del lado de la unión va justo en la articulación: la caja de una pata acaba donde la \
+pata entra en el cuerpo, sin coger la barriga ni el pecho; la de una cabeza empieza en el \
+cuello. Comprueba la caja en las TRES vistas: en cada una debe rodear la pieza y no \
+invadir otras partes. Las piezas simétricas (patas izquierda y derecha) llevan cajas \
+simétricas.
+- pivote: [x, y, z] del centro de la articulación, dentro de la pieza y en su extremo \
+unido al cuerpo: el centro del eje de una rueda, la cadera u hombro de una pata (arriba de \
+la pata), la base de la cola, el cuello.
+- eje: "x", "y" o "z". El eje (el pasador) debe atravesar la pieza y entrar en el cuerpo \
+por un lado: una pata unida al costado gira sobre el eje que va hacia ese costado; una \
+cola que sale del lomo hacia arriba se menea sobre "z". Una pata que camina hacia delante gira sobre "x"; una cabeza que dice \
+que no gira sobre "z" y una que asiente sobre "x"; una rueda sobre el eje de su buje.
+- angulo_min y angulo_max en grados (0 = posición del modelo; signo según la regla de la \
+mano derecha sobre el eje positivo). Para "giro", 0 y 360. Usa amplitudes realistas: \
+patas de -25 a 25, cabeza de -20 a 20, cola de -30 a 30, brazo de catapulta 0 a -70.
+- movimiento: "lanzar" si sube rápido y vuelve despacio (catapulta, golpe), "oscilar" si \
+es un vaivén continuo (patas al andar, cola, cabeza, alas).
+- fase: de 0 a 1, para coordinar: en un animal de cuatro patas que camina, las patas \
+diagonales van juntas (delantera izquierda y trasera derecha 0, las otras dos 0.5). Si no \
+hace falta, 0.
 Incluye solo piezas que se puedan separar de forma razonable. Lee las coordenadas en las \
 cuadrículas con cuidado. Responde en español.{descripcion}"""
+
+REVISION = """Esta es la vista con tus cajas dibujadas (cada una con su nombre). Revísalas en \
+las tres vistas: cada caja debe rodear solo su pieza, la cara del lado de la unión debe \
+quedar justo en la articulación (sin coger cuerpo, barriga ni pecho), el pivote dentro de \
+la pieza en su extremo unido y las piezas simétricas con cajas simétricas. Devuelve la \
+lista completa corregida (aunque no cambies nada)."""
 
 
 @dataclass
@@ -91,6 +114,8 @@ class PiezaMovil:
     eje: str
     angulo_min: float = 0.0
     angulo_max: float = 360.0
+    movimiento: str = "lanzar"
+    fase: float = 0.0
     explicacion: str = ""
 
 
@@ -115,8 +140,12 @@ def _png_b64(imagen) -> dict:
                                          "data": base64.standard_b64encode(buf.getvalue()).decode()}}
 
 
-def analizar(malla: trimesh.Trimesh, imagen_original=None, descripcion: str = "") -> tuple[list, str]:
-    """Pide a Claude las piezas móviles. Devuelve (lista de PiezaMovil, resumen)."""
+def analizar(malla: trimesh.Trimesh, imagen_original=None, descripcion: str = "",
+             revisar: bool = True) -> tuple[list, str]:
+    """Pide a Claude las piezas móviles. Devuelve (lista de PiezaMovil, resumen).
+
+    Con `revisar`, se le enseñan sus propias cajas dibujadas sobre las vistas para que
+    las corrija (cuesta el doble, pero las cajas salen mucho mejor)."""
     import anthropic
 
     lo, hi = malla.bounds
@@ -130,22 +159,34 @@ def analizar(malla: trimesh.Trimesh, imagen_original=None, descripcion: str = ""
     for nombre, im in vistas.vistas(malla).items():
         contenido += [{"type": "text", "text": f"Vista {nombre}:"}, _png_b64(im)]
     contenido.append({"type": "text", "text": texto})
+    mensajes = [{"role": "user", "content": contenido}]
 
     cliente = anthropic.Anthropic()
-    respuesta = cliente.beta.messages.create(
-        model=MODELO_IA,
-        max_tokens=16000,
-        betas=["server-side-fallback-2026-07-01"],
-        fallbacks="default",                 # si el modelo declina, otro lo intenta
-        output_config={"effort": "high",
-                       "format": {"type": "json_schema", "schema": ESQUEMA}},
-        messages=[{"role": "user", "content": contenido}],
-    )
-    if respuesta.stop_reason == "refusal":
-        raise RuntimeError("La IA no quiso analizar este modelo.")
-    if respuesta.stop_reason == "max_tokens":
-        raise RuntimeError("La respuesta de la IA se cortó; inténtalo de nuevo.")
-    datos = json.loads(next(b.text for b in respuesta.content if b.type == "text"))
+
+    def pedir():
+        respuesta = cliente.beta.messages.create(
+            model=MODELO_IA,
+            max_tokens=16000,
+            betas=["server-side-fallback-2026-07-01"],
+            fallbacks="default",                 # si el modelo declina, otro lo intenta
+            output_config={"effort": "high",
+                           "format": {"type": "json_schema", "schema": ESQUEMA}},
+            messages=mensajes,
+        )
+        if respuesta.stop_reason == "refusal":
+            raise RuntimeError("La IA no quiso analizar este modelo.")
+        if respuesta.stop_reason == "max_tokens":
+            raise RuntimeError("La respuesta de la IA se cortó; inténtalo de nuevo.")
+        return next(b.text for b in respuesta.content if b.type == "text")
+
+    crudo = pedir()
+    datos = json.loads(crudo)
+    if revisar and datos["piezas"]:
+        piezas = [PiezaMovil(**p) for p in datos["piezas"]]
+        mensajes += [{"role": "assistant", "content": crudo},
+                     {"role": "user", "content": [_png_b64(vista_previa(malla, piezas)),
+                                                  {"type": "text", "text": REVISION}]}]
+        datos = json.loads(pedir())
     return [PiezaMovil(**p) for p in datos["piezas"]], datos["resumen"]
 
 
@@ -156,7 +197,8 @@ def a_json(piezas: list, resumen: str = "") -> str:
 
 def desde_json(texto: str) -> list:
     datos = json.loads(texto)
-    return [PiezaMovil(**p) for p in datos.get("piezas", [])]
+    campos = set(PiezaMovil.__dataclass_fields__)
+    return [PiezaMovil(**{k: v for k, v in p.items() if k in campos}) for p in datos.get("piezas", [])]
 
 
 def vista_previa(malla, piezas: list):
@@ -197,6 +239,7 @@ def construir(malla: trimesh.Trimesh, piezas: list, modo: str = "montada",
     moviles = []
     for p in piezas:
         lo, hi = np.minimum(p.caja_min, p.caja_max), np.maximum(p.caja_min, p.caja_max)
+        lo, hi = _recortar_caja(cuerpo, lo, hi, p, res)
         interior = cuerpo ^ _caja(lo + holgura, hi - holgura)
         trozos = sorted(interior.decompose(), key=lambda t: -t.volume())
         if not trozos:
@@ -220,7 +263,7 @@ def construir(malla: trimesh.Trimesh, piezas: list, modo: str = "montada",
         res.partes.append(animacion.Articulacion(
             p.nombre, _a_trimesh(hija), "giro" if p.tipo == "giro" else "bisagra",
             tuple(p.pivote), EJES[p.eje], p.angulo_min, p.angulo_max,
-            color=COLORES[i % len(COLORES)]))
+            movimiento=p.movimiento, fase=float(p.fase), color=COLORES[i % len(COLORES)]))
     trozos = sorted(cuerpo.decompose(), key=lambda t: -t.volume())
     cuerpo = m3d.Manifold.batch_boolean([t for t in trozos if t.volume() > 0.002 * trozos[0].volume()],
                                         m3d.OpType.Add)
@@ -229,9 +272,96 @@ def construir(malla: trimesh.Trimesh, piezas: list, modo: str = "montada",
     return res
 
 
-def _eje(p: PiezaMovil, hija, cuerpo, modo, holgura, diametro, res):
+def _recortar_caja(cuerpo, lo, hi, p, res, pasos=48):
+    """Si una cara de la caja corta algo mucho más ancho que la pieza (la caja de una
+    pata que se mete en la barriga), la acerca hasta la sección más estrecha cercana:
+    el "cuello" donde la pieza se une al cuerpo. Después mete el pivote en la caja."""
+    lo, hi = np.array(lo, float), np.array(hi, float)
+    interior = cuerpo ^ _caja(lo, hi)
+    if interior.is_empty():
+        return lo, hi
+    for a in range(3):
+        if a == "xyz".index(p.eje) and p.tipo == "giro":
+            continue                     # a lo largo del eje de una rueda no se recorta
+        # Matriz que lleva el eje `a` a Z para cortar en rodajas.
+        orden = [(a + 1) % 3, (a + 2) % 3, a]
+        m = np.zeros((3, 4))
+        m[np.arange(3), orden] = 1.0
+        rodajas = interior.transform(m)
+        zs = np.linspace(lo[a], hi[a], pasos + 2)[1:-1]
+        areas = np.array([rodajas.slice(float(z)).area() for z in zs])
+        if areas.max() <= 0:
+            continue
+        tipica = np.median(areas[areas > 0])
+        for lado in (0, 1):
+            serie = areas if lado == 0 else areas[::-1]
+            if serie[0] < 1.3 * tipica:  # la cara no corta nada ancho
+                continue
+            # Solo si al otro lado de la cara sigue habiendo cuerpo (no en un pie
+            # apoyado en el suelo, que simplemente es más ancho que la pata).
+            fuera_lo, fuera_hi = lo.copy(), hi.copy()
+            if lado == 0:
+                fuera_lo[a], fuera_hi[a] = lo[a] - 1.0, lo[a]
+            else:
+                fuera_lo[a], fuera_hi[a] = hi[a], hi[a] + 1.0
+            if (cuerpo ^ _caja(fuera_lo, fuera_hi)).volume() < 0.3 * serie[0]:
+                continue
+            tramo = serie[: int(pasos * 0.45)].copy()
+            if a != "xyz".index(p.eje):
+                # Nunca más allá del pivote: ahí está la articulación.
+                zz = (zs if lado == 0 else zs[::-1])[: len(tramo)]
+                piv = float(p.pivote[a])
+                tramo[(zz > piv - 1.5) if lado == 0 else (zz < piv + 1.5)] = 0
+            k = int(np.argmin(np.where(tramo > 0, tramo, np.inf)))
+            if not np.isfinite(tramo[k]) or tramo[k] > 0.6 * serie[0] or k == 0:
+                continue
+            z = (zs if lado == 0 else zs[::-1])[k]
+            antes = lo[a] if lado == 0 else hi[a]
+            if lado == 0:
+                lo[a] = z
+            else:
+                hi[a] = z
+            res.avisos.append(f"{p.nombre}: caja recortada en {'XYZ'[a]} de {antes:.1f} a "
+                              f"{z:.1f} mm (no coge parte del cuerpo).")
+            interior = cuerpo ^ _caja(lo, hi)
+            rodajas = interior.transform(m)
+    # El pivote, dentro de la caja (salvo a lo largo de su eje, donde da igual).
+    piv = np.array(p.pivote, float)
+    eje = "xyz".index(p.eje)
+    for a in range(3):
+        if a != eje:
+            margen = min(1.5, (hi[a] - lo[a]) / 4)
+            piv[a] = np.clip(piv[a], lo[a] + margen, hi[a] - margen)
+    if np.linalg.norm(piv - np.asarray(p.pivote, float)) > 0.5:
+        res.avisos.append(f"{p.nombre}: pivote metido en la caja ({', '.join(f'{v:.1f}' for v in piv)}).")
+    p.pivote = [round(float(v), 2) for v in piv]
+    return lo, hi
+
+
+def _eje(p: PiezaMovil, hija, cuerpo, modo, holgura, diametro, res, probar_ejes=True):
     """Pasador a lo largo del eje de la pieza, por su pivote."""
     import manifold3d as m3d
+
+    if probar_ejes:
+        pivote, eje, n = list(p.pivote), p.eje, len(res.avisos)
+        h, c = _eje(p, hija, cuerpo, modo, holgura, diametro, res, False)
+        if not res.avisos[-1:] or "no hay cuerpo" not in res.avisos[-1] or p.tipo != "bisagra":
+            return h, c
+        # Con ese eje el pasador no tiene dónde apoyarse (una cola que sale del lomo
+        # no tiene cuerpo a los lados): se prueban los otros ejes.
+        for otro in "xyz".replace(eje, ""):
+            prueba = Mecanismo()
+            p.eje, p.pivote = otro, list(pivote)
+            h, c = _eje(p, hija, cuerpo, modo, holgura, diametro, prueba, False)
+            if not any("no hay cuerpo" in a or "no pasa" in a for a in prueba.avisos):
+                del res.avisos[n:]
+                res.avisos.append(f"{p.nombre}: con el eje {eje.upper()} no había dónde apoyarlo; "
+                                  f"gira sobre {otro.upper()}.")
+                res.avisos += prueba.avisos
+                res.pasadores += prueba.pasadores
+                return h, c
+        p.eje, p.pivote = eje, pivote
+        return hija, cuerpo
 
     ida, vuelta = _marco_plano(p.pivote, EJES[p.eje])
     h, c = hija.transform(ida), cuerpo.transform(ida)
@@ -271,6 +401,30 @@ def _eje(p: PiezaMovil, hija, cuerpo, modo, holgura, diametro, res):
                               "entre los dos lados del cuerpo.")
         else:
             abajo, arriba = [], []
+    if not abajo and not arriba:
+        # Se prueban pivotes cercanos dentro de la pieza (p. ej. más arriba en una pata,
+        # donde ya toca el cuerpo) hasta que el eje tenga cuerpo al lado.
+        cerca = 3 * holgura + 2
+        rejilla = [(dx, dy) for dx in np.arange(-9, 9.1, 1.5) for dy in np.arange(-9, 9.1, 1.5)
+                   if 0 < dx * dx + dy * dy <= 81]
+        for dx, dy in sorted(rejilla, key=lambda d: d[0] ** 2 + d[1] ** 2):
+            nuevo = vuelta[:, :3] @ np.array([dx, dy, 0.0]) + vuelta[:, 3]
+            ida2, vuelta2 = _marco_plano(nuevo, EJES[p.eje])
+            h2 = hija.transform(ida2)
+            tramos2 = _intervalos(h2)
+            if not tramos2:
+                continue
+            g0, g1 = min(tramos2, key=lambda t: abs((t[0] + t[1]) / 2 - (h0 + h1) / 2))
+            c2 = cuerpo.transform(ida2)
+            tc = _intervalos(c2)
+            ab = [t for t in tc if t[1] <= g0 + 0.1 and g0 - t[1] < cerca]
+            ar = [t for t in tc if t[0] >= g1 - 0.1 and t[0] - g1 < cerca]
+            if ab or ar:
+                res.avisos.append(f"{p.nombre}: pivote movido {np.hypot(dx, dy):.1f} mm hasta donde "
+                                  "la pieza toca el cuerpo.")
+                p.pivote = [round(float(v), 2) for v in nuevo]
+                ida, vuelta, h, c, h0, h1, abajo, arriba = ida2, vuelta2, h2, c2, g0, g1, ab, ar
+                break
     if not abajo and not arriba:
         res.avisos.append(f"{p.nombre}: no hay cuerpo junto al eje donde apoyar el pasador.")
         return hija, cuerpo

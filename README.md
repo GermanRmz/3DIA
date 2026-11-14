@@ -174,18 +174,26 @@ giran y un brazo que lanza, un cofre con tapa, una mandíbula...
 1. **Analizar con IA**: Claude mira tres vistas del modelo con cuadrícula en mm (y
    la imagen original si la subes) y propone las piezas móviles: su caja, el
    pivote, el eje y el tipo (*giro* para ruedas, *bisagra* para brazos y tapas).
+   Después Claude ve sus propias cajas dibujadas y las corrige (segunda pasada).
+   También decide el movimiento: `lanzar` (sube rápido y vuelve, catapulta) u
+   `oscilar` (vaivén: patas, cola, cabeza) y la `fase` (0-1) para coordinar piezas,
+   p. ej. patas diagonales a la vez al caminar.
    Sale una vista previa con las cajas y un JSON que puedes corregir a mano.
 2. **Construir**: separa cada pieza y le pone su eje.
    - *Montada*: se imprime ya ensamblada (print-in-place); el eje sale del cuerpo y
      la pieza gira alrededor con holgura.
    - *Separadas*: agujeros y pasadores sueltos (a presión en el cuerpo).
-   Si la pieza es fina se le añade un buje; si el pivote cae unos mm fuera, se
-   corrige; si la pieza está entre dos laterales, el eje los cruza de lado a lado.
+   Correcciones automáticas: si la caja se mete en el cuerpo (la de una pata que
+   coge barriga) se recorta por la sección más estrecha; si el pivote cae fuera o
+   el eje no toca el cuerpo se busca un punto cercano que sí; si con ese eje no hay
+   dónde apoyar el pasador se prueba otro (una cola que sale del lomo se menea
+   sobre Z); si la pieza es fina se le añade un buje; y si está entre dos
+   laterales, el eje los cruza de lado a lado. Todo se indica en el informe.
 3. Descargas: `.glb` animado (Blender, visores web; las ruedas giran y el brazo
    sube y vuelve), `.zip` con un STL por pieza y los pasadores, y `.3mf`.
 
-La IA necesita una clave de la API de Anthropic (cada análisis cuesta unos
-céntimos). Créala en https://console.anthropic.com y, antes de lanzar la app:
+La IA necesita una clave de la API de Anthropic (cada análisis, con su revisión,
+cuesta unos céntimos). Créala en https://console.anthropic.com y, antes de lanzar la app:
 
 ```bash
 export ANTHROPIC_API_KEY="tu-clave"
