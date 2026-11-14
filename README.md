@@ -192,8 +192,11 @@ giran y un brazo que lanza, un cofre con tapa, una mandíbula...
      la base de la cola); el plano puede ir inclinado y la pieza gira alrededor
      de su perpendicular.
    - *Ruedas*: su caja, ajustada si se queda corta.
-   El pasador se coloca donde tiene cuerpo en el que apoyarse; en piezas finas se
-   añade un collarín corto y el pasador solo entra en él. Todo se indica en el informe.
+   El pasador se coloca donde tiene cuerpo en el que apoyarse y nunca se añade
+   material al modelo: se usa el eje más grueso que quepa dentro de la pieza (4 mm);
+   en piezas finas, uno de 2 mm impreso (montada) o un trozo de filamento de
+   1,75 mm (separadas). Si no cabe ninguno (una cola de 2 mm), la pieza queda sin
+   eje y el informe lo dice.
 3. Descargas: `.glb` animado (Blender, visores web; las ruedas giran y el brazo
    sube y vuelve), `.zip` con un STL por pieza y los pasadores, y `.3mf`.
 

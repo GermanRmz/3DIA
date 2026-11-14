@@ -429,18 +429,19 @@ def _cortar_articulacion(cuerpo, p, lo, hi, holgura, res, L=400.0, apendices=())
     candidatos = [piv] + [piv + i * d + j * e for i in np.arange(-4.5, 4.6, 1.5)
                           for j in np.arange(-4.5, 4.6, 1.5) if i or j]
     candidatos = sorted(candidatos, key=lambda q: np.linalg.norm(q - piv))
-    primero = None
+    primero = con_apoyo = None
     for q in candidatos:
         corte = _hombro(cuerpo, p, lo, hi, holgura, q, eje, d, e, L, zona)
         if corte is None:
             continue
         primero = primero or (corte, q)
         if _tiene_apoyo(corte[0], corte[1], q, eje, holgura):
+            con_apoyo = (corte, q)
             break
     else:
-        if primero is None:
+        if con_apoyo is None and primero is None:
             return None
-        corte, q = primero
+        corte, q = con_apoyo or primero
     hija, cuerpo, radio = corte
     if np.linalg.norm(q - piv) > 0.1:
         res.avisos.append(f"{p.nombre}: pivote movido {np.linalg.norm(q - piv):.1f} mm para que "
@@ -529,7 +530,7 @@ def _hombro(cuerpo, p, lo, hi, holgura, piv, eje, d, e, L, zona=None):
         ancho = float(np.ptp(p3 @ e))
     else:
         ancho = 6.0
-    radio = float(np.clip(0.5 * ancho, 2.5, 6.0))
+    radio = float(np.clip(0.5 * ancho, 3.8, 6.0))   # 3,8: cabe un eje de 4 mm con pared
     # Tramo a lo largo del eje: el de la pieza que cuelga.
     vb = np.asarray(colg.to_mesh().vert_properties)[:, :3]
     t = (vb - piv) @ eje
@@ -729,37 +730,37 @@ def _eje(p: PiezaMovil, hija, cuerpo, modo, holgura, diametro, res):
         a, b = min(z0, z1), max(z0, z1)
         return m3d.Manifold.cylinder(b - a, radio, radio, 40).translate((0, 0, a))
 
-    # Radio: lo que quepa en la sección de la pieza alrededor del eje, con pared.
-    pared = 1.2
-    buje = False
+    # Radio: el pasador más grueso que quepa en la pieza alrededor del eje, con
+    # pared. No se añade material a la pieza: si es fina, el eje es más fino (o un
+    # trozo de filamento de 1,75 mm si va suelto).
     seccion = h.slice((h0 + h1) / 2)
+
+    def cabe(radio, pared):
+        hueco = radio + holgura
+        return (seccion.offset(-pared, m3d.JoinType.Round) ^ m3d.CrossSection.circle(hueco, 32)).area() \
+            >= 0.95 * np.pi * hueco ** 2
+
+    filamento = False
+    pared = 1.2
     r = diametro / 2 if diametro > 0 else 2.0
-    while r > 1.5 and (seccion.offset(-pared, m3d.JoinType.Round) ^ m3d.CrossSection.circle(
-            r + holgura, 32)).area() < 0.95 * np.pi * (r + holgura) ** 2:
+    while r > 1.5 and not cabe(r, pared):
         r -= 0.25
-    if (seccion.offset(-pared, m3d.JoinType.Round) ^ m3d.CrossSection.circle(r + holgura, 32)).area() \
-            < 0.95 * np.pi * (r + holgura) ** 2:
-        # Pieza fina (p. ej. un brazo plano): se le añade un buje cilíndrico alrededor
-        # del eje, sin salirse de su caja, para que el pasador tenga pared. Con buje
-        # el pasador recupera su grosor normal (uno de 2,5 mm se parte).
-        r = diametro / 2 if diametro > 0 else 2.0
-        lo, hi = np.minimum(p.caja_min, p.caja_max), np.maximum(p.caja_min, p.caja_max)
-        dentro = _caja(lo + holgura, hi - holgura).transform(ida)
-        # Solo en el tramo junto al cuerpo (en una cola fina, no a todo lo largo).
-        buje = True
-        largo_buje = 2 * pared + 2.6          # collarín corto, lo justo para el pasador
-        if abajo:
-            b0, b1 = h0, min(h1, h0 + largo_buje)
+    if not cabe(r, pared):
+        pared = 0.8
+        if modo == "separadas" and cabe(0.95 - holgura, pared):
+            r, filamento = 0.875, True        # trozo de filamento de 1,75 mm
+        elif modo != "separadas" and cabe(1.0, pared):
+            r = 1.0
         else:
-            b0, b1 = max(h0, h1 - largo_buje), h1
-        h = h + (cil(b0, b1, r + holgura + pared) ^ dentro)
-        res.avisos.append(f"{p.nombre}: se añadió un buje de {2 * (r + holgura + pared):.1f} mm "
-                          "alrededor del eje para el pasador.")
+            res.avisos.append(f"{p.nombre}: la pieza es demasiado fina para un eje por dentro; "
+                              "queda sin pasador (puedes pegarla).")
+            return hija, cuerpo
+        res.avisos.append(f"{p.nombre}: pieza fina, eje de {2 * r:.2f} mm.")
 
     if bool(abajo) != bool(arriba):
-        # Apoyado por un solo lado: el pasador entra en la pieza solo lo necesario
-        # (el collarín, o 10 mm), no a lo largo de toda una cola o una cabeza.
-        penetra = (b1 - b0) if buje else 10.0
+        # Apoyado por un solo lado: el pasador entra en la pieza solo lo necesario,
+        # no a lo largo de toda una cola o una cabeza.
+        penetra = 10.0
         if abajo:
             h1 = min(h1, h0 + penetra)
         else:
@@ -772,9 +773,15 @@ def _eje(p: PiezaMovil, hija, cuerpo, modo, holgura, diametro, res):
     if modo == "separadas":
         ini = z_ini if z_ini is not None else h0 + 0.8
         fin = z_fin if z_fin is not None else h1 - 0.8
+        largo = fin - ini
+        if filamento:
+            h = h - cil(h0 - 1, h1 + 1, 0.95)                 # gira suelto
+            c = c - cil(ini - 0.2, fin + 0.2, 0.9)            # ajustado en el cuerpo
+            res.avisos.append(f"{p.nombre}: usa como eje un trozo de filamento de 1,75 mm de "
+                              f"{largo:.0f} mm.")
+            return h.transform(vuelta), c.transform(vuelta)
         h = h - cil(h0 - 1, h1 + 1, r + holgura)
         c = c - cil(ini - 0.2, fin + 0.2, r + 0.05)          # a presión en el cuerpo
-        largo = fin - ini
         res.pasadores.append(_a_trimesh(m3d.Manifold.cylinder(largo, r, r, 40)))
         res.avisos.append(f"{p.nombre}: pasador suelto de {2 * r:.1f} x {largo:.1f} mm." +
                           (" Muy corto para sujetar: mejor en modo montada." if largo < 4 else ""))
@@ -785,7 +792,7 @@ def _eje(p: PiezaMovil, hija, cuerpo, modo, holgura, diametro, res):
         c = c + cil(z_ini, z_fin, r)
         h = h - cil(h0 - 1, h1 + 1, r + holgura)
     else:                                                 # por un lado: pestaña que retiene
-        pared, grosor, r_pestana = 1.2, 1.5, r + 1.0
+        grosor, r_pestana = 1.5, r + (1.0 if pared > 1 else 0.5)
         if z_ini is not None:
             fin = h1 - pared
             c = c + cil(z_ini, fin, r) + cil(fin - grosor, fin, r_pestana)
