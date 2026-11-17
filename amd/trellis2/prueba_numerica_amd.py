@@ -5,8 +5,14 @@ referencia en float32. Uso:
     python_embeded\\python.exe prueba_numerica_amd.py
 """
 import math
+import os
+import sys
+
+if "--aotriton" in sys.argv:
+    os.environ["TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL"] = "1"
 
 import torch
+from torch.nn.attention import SDPBackend, sdpa_kernel
 import torch.nn.functional as F
 
 dev = "cuda"
@@ -30,11 +36,26 @@ def ref_atencion(q, k, v, mascara=None):
     return torch.softmax(s, -1) @ v.float()
 
 
-# 1) Atencion densa (transformers de flujo y DINOv3)
-for dt in (torch.float16, torch.bfloat16):
-    for L in (1024, 4096):
-        q, k, v = (torch.randn(1, 16, L, 64, device=dev, dtype=dt) for _ in range(3))
-        informe(f"SDPA {str(dt)[6:]} L={L}", F.scaled_dot_product_attention(q, k, v), ref_atencion(q, k, v))
+# 1) Atencion densa, probando cada motor de SDPA por separado
+#    (ComfyUI activa AOTriton en AMD; se simula con --aotriton)
+print("AOTriton experimental:", os.environ.get("TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL", "no"))
+casos = [(4096, 4096, 64), (4096, 4096, 128), (4096, 1029, 64), (4096, 1029, 128), (8192, 8192, 128)]
+for motor in (SDPBackend.MATH, SDPBackend.EFFICIENT_ATTENTION, SDPBackend.FLASH_ATTENTION):
+    for dt in (torch.float16, torch.bfloat16):
+        for Lq, Lk, D in casos:
+            H = 1536 // D if D == 128 else 16
+            q = torch.randn(1, H, Lq, D, device=dev, dtype=dt)
+            k, v = (torch.randn(1, H, Lk, D, device=dev, dtype=dt) for _ in range(2))
+            nombre = f"SDPA {motor.name} {str(dt)[6:]} q={Lq} kv={Lk} d={D}"
+            try:
+                with sdpa_kernel([motor]):
+                    out = F.scaled_dot_product_attention(q, k, v)
+            except Exception as e:
+                print(f"[--] {nombre}: no disponible ({type(e).__name__})")
+                continue
+            ref = torch.cat([ref_atencion(q[:, :, i:i + 1024], k, v) for i in range(0, Lq, 1024)], 2)
+            informe(nombre, out, ref)
+            del q, k, v, out, ref
 
 # 2) Atencion con mascara (ruta SDPA por ventanas del parche)
 q, k, v = (torch.randn(64, 16, 512, 64, device=dev, dtype=torch.float16) for _ in range(3))
