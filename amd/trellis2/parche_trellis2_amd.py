@@ -12,6 +12,7 @@ Que hace (se puede ejecutar varias veces sin problema):
 4. Convolucion dispersa: si flex_gemm no tiene Triton, usa ``explicit_gemm``.
 5. Mallas: quita los vertices NaN/inf que deja el decodificador en float16
    (y avisa de cuantos habia), para que cuBVH no falle.
+6. Depuracion: con AMD_DEPURAR=1 guarda la estructura dispersa en .ply.
 Guarda copia ``.orig`` de cada archivo antes de cambiarlo.
 """
 import os
@@ -218,6 +219,71 @@ Mesh.__init__ = _amd_mesh_init
 MeshWithVoxel.__init__ = _amd_mesh_voxel_init
 '''
 
+PARCHE_DEPURAR = MARCA + '''
+# Con la variable de entorno AMD_DEPURAR=1 guarda la estructura dispersa
+# (la primera forma gruesa que genera TRELLIS.2) como nubes de puntos .ply
+# en ComfyUI/output, antes y despues del relleno de huecos.
+_amd_ss_original = Trellis2ImageTo3DPipeline.sample_sparse_structure
+
+
+def _amd_guardar_ply(nombre, xyz):
+    import numpy as _np
+    xyz = _np.asarray(xyz, dtype=_np.float32)
+    ruta = os.path.join(folder_paths.get_output_directory(), nombre)
+    with open(ruta, "w") as f:
+        f.write(f"ply\\nformat ascii 1.0\\nelement vertex {len(xyz)}\\n"
+                "property float x\\nproperty float y\\nproperty float z\\nend_header\\n")
+        for p in xyz:
+            f.write(f"{p[0]} {p[1]} {p[2]}\\n")
+    return ruta
+
+
+def _amd_describir(etiqueta, ocupado):
+    import numpy as _np
+    from scipy.ndimage import label as _label
+    ocupado = _np.asarray(ocupado, dtype=bool)
+    n = int(ocupado.sum())
+    _, piezas = _label(ocupado)
+    pts = _np.argwhere(ocupado)
+    caja = (pts.min(0).tolist(), pts.max(0).tolist()) if n else None
+    print(f"[AMD-DEPURAR] {etiqueta}: rejilla {ocupado.shape}, {n} voxeles, "
+          f"{piezas} piezas separadas, caja {caja}")
+    return pts
+
+
+def _amd_sample_sparse_structure(self, *args, **kwargs):
+    if not os.environ.get("AMD_DEPURAR"):
+        return _amd_ss_original(self, *args, **kwargs)
+    decoder = self.models.get("sparse_structure_decoder")
+    capturado = {}
+    if decoder is not None:
+        forward_original = decoder.forward
+
+        def forward(*a, **k):
+            salida = forward_original(*a, **k)
+            capturado["bruto"] = (salida > 0)[0, 0].detach().cpu().numpy()
+            return salida
+        decoder.forward = forward
+    try:
+        coords = _amd_ss_original(self, *args, **kwargs)
+    finally:
+        if decoder is not None:
+            del decoder.forward
+    if "bruto" in capturado:
+        pts = _amd_describir("estructura del decodificador (antes de rellenar)", capturado["bruto"])
+        print("[AMD-DEPURAR] guardado", _amd_guardar_ply("amd_ss_bruto.ply", pts))
+    c = coords[0] if isinstance(coords, (list, tuple)) else coords
+    if torch.is_tensor(c) and c.dim() == 2 and c.shape[1] >= 3:
+        xyz = c[:, -3:].detach().cpu().numpy()
+        print(f"[AMD-DEPURAR] estructura final: {xyz.shape[0]} voxeles, "
+              f"caja {xyz.min(0).tolist()} - {xyz.max(0).tolist()}")
+        print("[AMD-DEPURAR] guardado", _amd_guardar_ply("amd_ss_final.ply", xyz))
+    return coords
+
+
+Trellis2ImageTo3DPipeline.sample_sparse_structure = _amd_sample_sparse_structure
+'''
+
 TRITON_ORIGINAL = "import triton\nimport triton.compiler\n"
 TRITON_NUEVO = (MARCA + "\ntry:\n    import triton\n    import triton.compiler\n"
                 "except ImportError:\n    triton = None\n")
@@ -295,7 +361,9 @@ def main():
 
     print("5) Mallas sin vertices NaN")
     anadir_al_final(os.path.join(nodo, "trellis2", "representations", "mesh", "base.py"), PARCHE_MALLA)
-    print("6) Comprobando modulos que importa el nodo")
+    print("6) Depuracion de la estructura dispersa (AMD_DEPURAR=1)")
+    anadir_al_final(os.path.join(nodo, "trellis2", "pipelines", "trellis2_image_to_3d.py"), PARCHE_DEPURAR)
+    print("7) Comprobando modulos que importa el nodo")
     faltan = []
     for m in ["torch", "torchvision", "trimesh", "easydict", "utils3d", "transformers", "cv2",
               "pymeshlab", "meshlib.mrmeshpy", "cumesh", "o_voxel", "flex_gemm.ops.grid_sample",
