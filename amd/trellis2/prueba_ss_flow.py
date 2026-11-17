@@ -93,8 +93,12 @@ ruta_dec = os.path.join(raiz, "ComfyUI", "models", "microsoft", "TRELLIS-image-l
 if os.path.exists(ruta_dec + ".json"):
     dec = models.from_pretrained(ruta_dec).eval()
     z = torch.randn(1, C, R, R, R)
+    dec_cpu = copy.deepcopy(dec)
+    if hasattr(dec_cpu, "convert_to_fp32"):
+        dec_cpu.convert_to_fp32()
+    dec_cpu = dec_cpu.float()
     with torch.no_grad():
-        d_cpu = copy.deepcopy(dec).float()(z)
+        d_cpu = dec_cpu(z)
         d_gpu = dec.cuda()(z.cuda())
     print(f"\n== decodificador ==\nsimilitud {cos(d_gpu, d_cpu):.5f}, "
           f"ocupacion CPU {(d_cpu > 0).float().mean().item():.4f}, GPU {(d_gpu > 0).float().mean().item():.4f}")
