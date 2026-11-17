@@ -9,6 +9,7 @@ Que hace (se puede ejecutar varias veces sin problema):
 2. nodes.py: ``import triton`` pasa a ser opcional (el nodo no lo usa).
 3. Atencion densa y dispersa: si flash_attn/xformers no estan instalados,
    se usa SDPA de PyTorch. La atencion por ventanas recibe una version SDPA.
+4. Convolucion dispersa: si flex_gemm no tiene Triton, usa ``explicit_gemm``.
 Guarda copia ``.orig`` de cada archivo antes de cambiarlo.
 """
 import os
@@ -167,6 +168,17 @@ def sparse_windowed_scaled_dot_product_cross_attention(q, kv, q_window_size, kv_
     return q.replace(out[q_bwd])
 '''
 
+PARCHE_CONV = MARCA + '''
+try:
+    import flex_gemm.kernels as _amd_fgk
+    if getattr(_amd_fgk, "triton", None) is None:
+        # Sin Triton (Windows ROCm) solo funciona el algoritmo explicit_gemm de flex_gemm.
+        FLEX_GEMM_ALGO = "explicit_gemm"
+        print("[SPARSE] flex_gemm sin Triton: se usa explicit_gemm")
+except Exception:
+    pass
+'''
+
 TRITON_ORIGINAL = "import triton\nimport triton.compiler\n"
 TRITON_NUEVO = (MARCA + "\ntry:\n    import triton\n    import triton.compiler\n"
                 "except ImportError:\n    triton = None\n")
@@ -239,8 +251,10 @@ def main():
     anadir_al_final(os.path.join(base, "attention", "config.py"), PARCHE_CONFIG_DENSA)
     anadir_al_final(os.path.join(base, "sparse", "config.py"), PARCHE_CONFIG_DISPERSA)
     anadir_al_final(os.path.join(base, "sparse", "attention", "windowed_attn.py"), PARCHE_VENTANAS)
+    print("4) Convolucion dispersa sin Triton")
+    anadir_al_final(os.path.join(base, "sparse", "conv", "config.py"), PARCHE_CONV)
 
-    print("4) Comprobando modulos que importa el nodo")
+    print("5) Comprobando modulos que importa el nodo")
     faltan = []
     for m in ["torch", "torchvision", "trimesh", "easydict", "utils3d", "transformers", "cv2",
               "pymeshlab", "meshlib.mrmeshpy", "cumesh", "o_voxel", "flex_gemm.ops.grid_sample",
