@@ -10,6 +10,8 @@ Que hace (se puede ejecutar varias veces sin problema):
 3. Atencion densa y dispersa: si flash_attn/xformers no estan instalados,
    se usa SDPA de PyTorch. La atencion por ventanas recibe una version SDPA.
 4. Convolucion dispersa: si flex_gemm no tiene Triton, usa ``explicit_gemm``.
+5. Mallas: quita los vertices NaN/inf que deja el decodificador en float16
+   (y avisa de cuantos habia), para que cuBVH no falle.
 Guarda copia ``.orig`` de cada archivo antes de cambiarlo.
 """
 import os
@@ -179,6 +181,43 @@ except Exception:
     pass
 '''
 
+PARCHE_MALLA = MARCA + '''
+def _amd_vertices_finitos(vertices, faces):
+    """Quita vertices NaN/inf (y las caras que los usan); cuenta cuantos habia."""
+    if not torch.is_tensor(vertices) or not torch.is_tensor(faces) or vertices.numel() == 0:
+        return vertices, faces
+    ok = torch.isfinite(vertices).all(dim=1)
+    if bool(ok.all()):
+        return vertices, faces
+    total, malos = vertices.shape[0], int((~ok).sum())
+    f = faces.long()
+    caras_ok = ok[f].all(dim=1)
+    nuevo_indice = torch.cumsum(ok.long(), 0) - 1
+    faces = nuevo_indice[f[caras_ok]].to(faces.dtype)
+    vertices = vertices[ok]
+    print(f"[AMD] {malos} de {total} vertices no finitos ({100 * malos / total:.3f}%); "
+          f"se quitan {int((~caras_ok).sum())} de {caras_ok.shape[0]} caras")
+    return vertices, faces
+
+
+_amd_init_mesh = Mesh.__init__
+_amd_init_mesh_voxel = MeshWithVoxel.__init__
+
+
+def _amd_mesh_init(self, vertices, faces, *args, **kwargs):
+    vertices, faces = _amd_vertices_finitos(vertices, faces)
+    _amd_init_mesh(self, vertices, faces, *args, **kwargs)
+
+
+def _amd_mesh_voxel_init(self, vertices, faces, *args, **kwargs):
+    vertices, faces = _amd_vertices_finitos(vertices, faces)
+    _amd_init_mesh_voxel(self, vertices, faces, *args, **kwargs)
+
+
+Mesh.__init__ = _amd_mesh_init
+MeshWithVoxel.__init__ = _amd_mesh_voxel_init
+'''
+
 TRITON_ORIGINAL = "import triton\nimport triton.compiler\n"
 TRITON_NUEVO = (MARCA + "\ntry:\n    import triton\n    import triton.compiler\n"
                 "except ImportError:\n    triton = None\n")
@@ -254,7 +293,9 @@ def main():
     print("4) Convolucion dispersa sin Triton")
     anadir_al_final(os.path.join(base, "sparse", "conv", "config.py"), PARCHE_CONV)
 
-    print("5) Comprobando modulos que importa el nodo")
+    print("5) Mallas sin vertices NaN")
+    anadir_al_final(os.path.join(nodo, "trellis2", "representations", "mesh", "base.py"), PARCHE_MALLA)
+    print("6) Comprobando modulos que importa el nodo")
     faltan = []
     for m in ["torch", "torchvision", "trimesh", "easydict", "utils3d", "transformers", "cv2",
               "pymeshlab", "meshlib.mrmeshpy", "cumesh", "o_voxel", "flex_gemm.ops.grid_sample",
