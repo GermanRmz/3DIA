@@ -1,8 +1,8 @@
 """Parche para ComfyUI en GPUs AMD (ROCm en Windows): multiplicaciones grandes por trozos.
 
-Problema encontrado: en ROCm/Windows (RX 9060 XT, gfx1200) una capa Linear cuya salida
-supera 2^28 elementos (1 GiB en float32) devuelve basura en las filas que pasan de ese
-limite, sin dar error. En TRELLIS.2/Pixal3D eso rompe la textura (y parte de la forma)
+Problema encontrado: en ROCm/Windows (RX 9060 XT, gfx1200) una multiplicacion de matrices
+(Linear/matmul) con mas de 524288 filas (2^19) devuelve basura a partir de esa fila, sin
+dar error, sea cual sea el numero de columnas. En TRELLIS.2/Pixal3D eso rompe la textura (y parte de la forma)
 en los niveles finos del decodificador (~1 millon de voxeles x 512 canales).
 
 Este parche envuelve torch.nn.functional.linear y torch.matmul para que, en la GPU,
@@ -20,9 +20,14 @@ import torch
 NODE_CLASS_MAPPINGS = {}
 NODE_DISPLAY_NAME_MAPPINGS = {}
 
-# Elementos maximos por bloque (de la salida y de la entrada). El fallo aparece a 2^28;
-# 2^26 deja margen de sobra y los bloques siguen siendo grandes (rapidos).
+# Filas maximas por bloque: el fallo aparece a partir de la fila 2^19; 2^18 deja margen.
+FILAS_MAX = int(os.environ.get("AMD_FILAS_TROZO", 1 << 18))
+# Ademas, elementos maximos por bloque (para no crear temporales enormes).
 LIMITE = int(os.environ.get("AMD_LIMITE_TROZO", 1 << 26))
+
+
+def _filas_por_trozo(n, k):
+    return max(1, min(FILAS_MAX, LIMITE // max(n, k, 1)))
 
 
 def _tensor_normal(t):
@@ -42,9 +47,9 @@ def instalar():
                 and weight.dim() == 2):
             n, k = weight.shape
             m = input.numel() // max(input.shape[-1], 1)
-            if m * max(n, k) > LIMITE and m > 1:
+            filas = _filas_por_trozo(n, k)
+            if m > filas:
                 x = input.reshape(m, input.shape[-1])
-                filas = max(1, LIMITE // max(n, k))
                 primero = linear_orig(x[:filas], weight, bias)
                 out = torch.empty((m, n), dtype=primero.dtype, device=primero.device)
                 out[:filas] = primero
@@ -58,8 +63,8 @@ def instalar():
                 and a.is_cuda and a.dim() == 2 and b.dim() == 2 and _tensor_normal(a) and _tensor_normal(b)):
             m, k = a.shape
             n = b.shape[1]
-            if m * max(n, k) > LIMITE and m > 1:
-                filas = max(1, LIMITE // max(n, k))
+            filas = _filas_por_trozo(n, k)
+            if m > filas:
                 primero = matmul_orig(a[:filas], b)
                 out = torch.empty((m, n), dtype=primero.dtype, device=primero.device)
                 out[:filas] = primero
@@ -73,7 +78,7 @@ def instalar():
     F.linear = linear
     torch.nn.functional.linear = linear
     torch.matmul = matmul
-    logging.info(f"[AMD] parche ROCm activo: Linear/matmul grandes por trozos de {LIMITE} elementos")
+    logging.info(f"[AMD] parche ROCm activo: Linear/matmul por trozos de hasta {FILAS_MAX} filas")
 
 
 if getattr(torch.version, "hip", None) and not os.environ.get("AMD_SIN_TROZOS"):

@@ -19,7 +19,8 @@ if not os.path.exists(ruta):
 dev = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
 print("dispositivo:", dev, torch.cuda.get_device_name(0) if dev.type == "cuda" else "")
 
-casos = [(928624, 128, 512), (600000, 512, 512), (3717012, 64, 64), (3717012, 64, 6), (300000, 1024, 1024)]
+casos = [(928624, 128, 512), (600000, 512, 512), (3717012, 64, 64), (3717012, 64, 6), (300000, 1024, 1024),
+         (524288, 32, 32), (524289, 32, 32), (2000000, 3, 3)]
 lin_orig = F.linear
 spec = importlib.util.spec_from_file_location("amd_parche_rocm", ruta)
 mod = importlib.util.module_from_spec(spec)
@@ -36,7 +37,7 @@ for i, (m, k, n) in enumerate(casos):
     ref = lin_orig(x, w, b)
     xd, wd, bd = x.to(dev), w.to(dev), b.to(dev)
     del x
-    print(f"\n{m}x{k} -> {n} ({m * n / 2**28:.2f} x 2^28 elementos de salida)")
+    print(f"\n{m}x{k} -> {n} ({m / 2**19:.2f} x 2^19 filas)")
     for titulo, fn in (("SIN parche", lin_orig), ("CON parche", lin_parche)):
         y = fn(xd, wd, bd).cpu()
         err = (y - ref).abs().max(1).values > 1e-3 * ref.abs().max()
