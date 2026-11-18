@@ -2,6 +2,8 @@
 
 Estado: geometría y textura correctas con los parches de abajo (probado con el hacha y el perro robot).
 
+**Para reinstalar todo desde cero, sigue [INSTALAR_AMD.md](INSTALAR_AMD.md).**
+
 ## Fallo principal encontrado
 En ROCm/Windows (gfx1200, torch 2.9.1+rocm7.2.1), cualquier multiplicación de matrices
 (`F.linear` / `torch.matmul`) con **más de 524288 filas (2^19)** devuelve basura a partir de esa
