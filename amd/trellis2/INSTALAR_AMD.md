@@ -43,10 +43,15 @@ La comprobación de `cumesh` falla con `0xC0000005` porque el kit trae cumesh co
 
 ## 2. cumesh compilado para gfx1200
 
-Si guardaste la rueda (ver «Respaldo de tu PC» al final), instálala y salta al paso 3:
+**Camino rápido:** la rueda ya compilada está en el Release
+[amd-cumesh-gfx1200](https://github.com/GermanRmz/3DIA/releases/tag/amd-cumesh-gfx1200).
+Descárgala desde esa página o con GitHub CLI, instálala y salta al paso 3:
 ```bat
+gh release download amd-cumesh-gfx1200 --repo GermanRmz/3dia --dir C:\AMD-AI\respaldo
 C:\AMD-AI\Pixal3D-ROCm\python_embeded\python.exe -m pip install --no-deps --force-reinstall C:\AMD-AI\respaldo\cumesh-1.0-cp312-cp312-win_amd64.whl
 ```
+En el mismo Release están `paquetes_pip.txt` (versiones exactas de todos los paquetes), `versiones.txt`
+y `comfyui_commit.txt`. Para comprobar el entorno, compara su `paquetes_pip.txt` con `python_embeded\python.exe -m pip freeze`.
 
 Si no la tienes, compílala.
 
@@ -179,7 +184,11 @@ El parche sustituye `nvdiffrast` por una versión en PyTorch, usa atención SDPA
 ## Respaldo de tu PC
 Lo que solo existe en tu PC es la rueda compilada de cumesh, que ahorra todo el paso 2. Ejecuta `respaldar_pc.bat`: junta en `C:\AMD-AI\respaldo` la rueda, la lista de paquetes (`paquetes_pip.txt`), las versiones, tus workflows guardados y los archivos de ComfyUI modificados.
 
-Para guardar la rueda en GitHub, súbela a un *Release* del repositorio:
+Ya está subida en el Release `amd-cumesh-gfx1200`. Si vuelves a compilarla, súbela así:
+```bat
+gh release upload amd-cumesh-gfx1200 C:\AMD-AI\wheels\cumesh-1.0-cp312-cp312-win_amd64.whl --repo GermanRmz/3dia --clobber
+```
+O desde la web, creando un *Release*:
 1. Abre https://github.com/GermanRmz/3dia/releases/new.
 2. En «Tag» escribe `amd-cumesh-gfx1200` y elige la rama `optimizacion-y-textura` como destino.
 3. Arrastra `C:\AMD-AI\respaldo\cumesh-1.0-cp312-cp312-win_amd64.whl` y pulsa «Publish release».
