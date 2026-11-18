@@ -131,6 +131,7 @@ Guárdalos en `C:\AMD-AI\Pixal3D-ROCm\ComfyUI\models\<carpeta>\`:
 | Carpeta | Archivo | URL |
 |---|---|---|
 | diffusion_models | pixal3d_bf16.safetensors | https://huggingface.co/Comfy-Org/Pixal3D/resolve/main/diffusion_models/pixal3d_bf16.safetensors |
+| diffusion_models | pixal3d_multiview_bf16.safetensors (solo para multivista) | https://huggingface.co/Comfy-Org/Pixal3D/resolve/main/diffusion_models/pixal3d_multiview_bf16.safetensors |
 | diffusion_models | trellis_2_bf16.safetensors | https://huggingface.co/Comfy-Org/TRELLIS.2/resolve/main/diffusion_models/trellis_2_bf16.safetensors |
 | vae | trellis_2_shape_vae_bf16.safetensors | https://huggingface.co/Comfy-Org/Pixal3D/resolve/main/vae/trellis_2_shape_vae_bf16.safetensors |
 | vae | trellis_2_texture_vae_bf16.safetensors | https://huggingface.co/Comfy-Org/Pixal3D/resolve/main/vae/trellis_2_texture_vae_bf16.safetensors |
@@ -154,6 +155,7 @@ python_embeded\python.exe ComfyUI\main.py --fp32-vae
 - Abre http://127.0.0.1:8188 y carga uno de estos dos workflows:
   - **`workflows/pixal3d_amd_bf16.json`**: arrástralo a la ventana. Ya trae los modelos bf16.
   - O la plantilla `3d_pixal3d_trellis2_image_to_model`, poniendo en «Switch Model Here» el cargador de arriba en `pixal3d_bf16` y el de abajo en `trellis_2_bf16`.
+- **Varias imágenes de la misma figura** (frente, izquierda, atrás y derecha): `workflows/pixal3d_multivista_4imagenes_amd_bf16.json`, o `pixal3d_multivista_hoja_amd_bf16.json` si las 4 vistas están en una sola imagen. Necesitan `pixal3d_multiview_bf16`.
 - En el booleano «Switch to Trellis2»: `false` usa Pixal3D (recomendado) y `true` usa TRELLIS.2.
 - Los demás valores se quedan como en la plantilla: upsample 1536, remesh 768, 700 000 caras y textura de 4096.
 
