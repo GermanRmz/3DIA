@@ -4,3 +4,6 @@ __pycache__/
 *.obj
 *.stl
 gradio_cached_examples/
+# Salidas de las pruebas (se regeneran con los scripts de pruebas/); se guarda el CSV de cupones
+pruebas/salida/*
+!pruebas/salida/resultados_cupon.csv

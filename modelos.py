@@ -14,9 +14,16 @@ os.environ.setdefault("HF_HUB_ETAG_TIMEOUT", "60")
 # Menos fragmentación de memoria en GPUs pequeñas (antes de importar torch).
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
-REPO_FORMA = "tencent/Hunyuan3D-2mini"
-DIT_FORMA = "hunyuan3d-dit-v2-mini-turbo"
-VAE_RAPIDO = "hunyuan3d-vae-v2-mini-turbo"
+# Modelos de forma: (repositorio, generador, decodificador rápido).
+# - mini: 0.6 B parámetros, el más rápido y el que menos memoria usa.
+# - estandar: Hunyuan3D-2 de 1.1 B, más detalle y formas más fieles; ~5 GB más
+#   de descarga y algo más lento. Cabe en GPUs de 6 GB con la gestión de memoria
+#   de generar3d.py.
+MODELOS_FORMA = {
+    "mini": ("tencent/Hunyuan3D-2mini", "hunyuan3d-dit-v2-mini-turbo", "hunyuan3d-vae-v2-mini-turbo"),
+    "estandar": ("tencent/Hunyuan3D-2", "hunyuan3d-dit-v2-0-turbo", "hunyuan3d-vae-v2-0-turbo"),
+}
+REPO_FORMA, DIT_FORMA, VAE_RAPIDO = MODELOS_FORMA["mini"]
 
 REPO_PINTURA = "tencent/Hunyuan3D-2"
 LUZ = "hunyuan3d-delight-v2-0"
@@ -44,11 +51,13 @@ def descargar(repo: str, patrones: list[str], ignorar: list[str], necesarios: li
                        "lo ya descargado no se pierde.")
 
 
-def carpeta_forma(con_vae_rapido: bool) -> str:
-    """Modelo de forma (~3.8 GB) y, en GPU, el decodificador rápido (~0.2 GB)."""
-    sub = [DIT_FORMA] + ([VAE_RAPIDO] if con_vae_rapido else [])
+def carpeta_forma(con_vae_rapido: bool, modelo: str = "mini") -> str:
+    """Modelo de forma (mini ~3.8 GB, estándar ~4.9 GB) y, en GPU, su
+    decodificador rápido (~0.4 GB)."""
+    repo, dit, vae = MODELOS_FORMA[modelo]
+    sub = [dit] + ([vae] if con_vae_rapido else [])
     archivos = [f"{s}/{n}" for s in sub for n in ("config.yaml", "model.fp16.safetensors")]
-    return descargar(REPO_FORMA, archivos, [], archivos)
+    return descargar(repo, archivos, [], archivos)
 
 
 def carpeta_pintura() -> str:

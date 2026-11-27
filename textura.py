@@ -6,17 +6,35 @@ huecos.
 
 Optimizaciones respecto al ejemplo oficial:
 - Se usa el modelo "turbo" de pintura (destilado, sin guía doble).
-- Menos pasos de difusión por defecto (configurables).
+- Quitar luces/sombras con 25 pasos en vez de 50 (las 6 vistas usan 10 pasos
+  fijos en el modelo turbo).
 - La malla se reduce antes de desplegar UVs (xatlas es lento con muchas caras).
 - El relleno de huecos de la textura está vectorizado (ver relleno_uv.py).
+- Las 6 vistas (512 px) se amplían con IA (superres.py) hasta la resolución de la
+  textura, en vez de estirarlas: la textura sale mucho más nítida.
 - En GPUs con poca VRAM los modelos se mueven a CPU cuando no se usan.
 
-Necesita GPU NVIDIA y el módulo compilado `custom_rasterizer` (ver README).
+Necesita GPU NVIDIA. Si el módulo compilado `custom_rasterizer` no está, se usa
+el rasterizador en PyTorch puro de rasterizador.py (mismo resultado).
 """
+import contextlib
+import os
+import sys
+import warnings
+
 import torch
 
 import modelos
 from relleno_uv import rellenar_textura
+
+# Avisos inofensivos de diffusers/hy3dgen (modelos en RAM con offload, programa
+# de pasos del modelo turbo, torch.range) que solo confunden.
+warnings.filterwarnings("ignore", message="torch.range is deprecated")
+try:
+    from diffusers.utils import logging as _registro_diffusers
+    _registro_diffusers.set_verbosity_error()
+except ImportError:
+    pass
 
 _pintor = None
 _config_pintor = None
@@ -25,7 +43,7 @@ _config_pintor = None
 class _PasosFijos:
     """Envuelve un pipeline de diffusers para forzar `num_inference_steps`.
 
-    hy3dgen tiene los pasos escritos a mano (50 y 30); así se pueden cambiar
+    hy3dgen tiene los pasos escritos a mano (50); así se pueden cambiar
     sin modificar la librería. El resto de atributos pasan tal cual.
     """
 
@@ -41,12 +59,62 @@ class _PasosFijos:
         return getattr(self._pipeline, nombre)
 
 
+class _VistasNitidas:
+    """Envuelve el modelo de vistas: amplía con IA (x4) cada vista generada antes
+    de proyectarla en la textura. hy3dgen las estira con un reescalado simple."""
+
+    def __init__(self, modelo):
+        self._modelo = modelo
+        self.activo = True
+
+    def __call__(self, *args, **kwargs):
+        vistas = self._modelo(*args, **kwargs)
+        if not self.activo:
+            return vistas
+        import superres
+
+        try:
+            vistas = [superres.ampliar(v) for v in vistas]
+        except Exception as e:  # sin red la primera vez, sin memoria...
+            print(f"No se pudieron ampliar las vistas con IA ({e}); se estiran sin más.")
+        finally:
+            superres.liberar()
+        return vistas
+
+    def __getattr__(self, nombre):
+        return getattr(self._modelo, nombre)
+
+
 def _uv_inpaint_rapido(self, texture, mask):
     """Sustituto vectorizado de MeshRender.uv_inpaint."""
     if isinstance(texture, torch.Tensor):
         texture = texture.cpu().numpy()
     vtx_pos, pos_idx, vtx_uv, uv_idx = self.get_mesh()
     return rellenar_textura(texture, mask, vtx_pos, vtx_uv, pos_idx, uv_idx)
+
+
+@contextlib.contextmanager
+def _carga_ligera():
+    """Reduce el pico de RAM al cargar los modelos de pintura (de ~17 GB a ~6 GB).
+
+    La UNet de pintura se construye en float32 (7.3 GB) y además lee su archivo
+    .bin entero a la RAM (otros 7.3 GB) antes de pasar a float16. Aquí se
+    construye directamente en float16 y el .bin se lee mapeado desde el disco.
+    """
+    carga_original = torch.load
+    tipo_original = torch.get_default_dtype()
+
+    def carga_mapeada(*args, **kwargs):
+        kwargs.setdefault("mmap", True)
+        return carga_original(*args, **kwargs)
+
+    torch.load = carga_mapeada
+    torch.set_default_dtype(torch.float16)
+    try:
+        yield
+    finally:
+        torch.load = carga_original
+        torch.set_default_dtype(tipo_original)
 
 
 def _vram_gb() -> float:
@@ -59,14 +127,13 @@ def comprobar_dependencias():
         raise RuntimeError("El texturizado necesita una GPU NVIDIA con CUDA.")
     try:
         import custom_rasterizer  # noqa: F401
-    except ImportError as e:
-        raise RuntimeError(
-            "Falta el módulo 'custom_rasterizer' (se compila una vez). "
-            "Mira la sección 'Textura' del README.") from e
+    except ImportError:
+        import rasterizador
+        sys.modules["custom_rasterizer"] = rasterizador
 
 
-def cargar_pintor(resolucion_textura: int = 2048, pasos_vistas: int = 15,
-                  pasos_luz: int = 25, vram_baja: bool | None = None):
+def cargar_pintor(resolucion_textura: int = 2048, pasos_luz: int = 25,
+                  vram_baja: bool | None = None):
     """Carga el modelo de pintura una sola vez (la primera vez descarga ~15 GB)."""
     global _pintor, _config_pintor
     comprobar_dependencias()
@@ -74,23 +141,29 @@ def cargar_pintor(resolucion_textura: int = 2048, pasos_vistas: int = 15,
         vram_baja = _vram_gb() < 16
 
     if _pintor is None or _config_pintor["vram_baja"] != vram_baja:
-        from hy3dgen.texgen import Hunyuan3DPaintPipeline
+        from hy3dgen.texgen import Hunyuan3DPaintPipeline, Hunyuan3DTexGenConfig
         from hy3dgen.texgen.differentiable_renderer.mesh_render import MeshRender
 
         MeshRender.uv_inpaint = _uv_inpaint_rapido
         _pintor = None
         torch.cuda.empty_cache()
-        _pintor = Hunyuan3DPaintPipeline.from_pretrained(modelos.carpeta_pintura(),
-                                                         subfolder=modelos.PINTURA)
+        carpeta = modelos.carpeta_pintura()
+        config = Hunyuan3DTexGenConfig(os.path.join(carpeta, modelos.LUZ),
+                                       os.path.join(carpeta, modelos.PINTURA), modelos.PINTURA)
+        # hy3dgen sube ambos modelos (~7 GB) a la GPU al cargarlos; con poca VRAM
+        # se cargan en CPU y el offload sube cada uno solo mientras se usa.
+        config.device = "cpu" if vram_baja else "cuda"
+        config.render_size = config.texture_size = resolucion_textura
+        with _carga_ligera():
+            _pintor = Hunyuan3DPaintPipeline(config)
         if vram_baja:
-            _pintor.enable_model_cpu_offload()
-        for nombre in ("delight_model", "multiview_model"):
-            modelo = _pintor.models[nombre]
-            modelo.pipeline = _PasosFijos(modelo.pipeline, 0)
-        _config_pintor = {"vram_baja": vram_baja, "resolucion": None}
+            _pintor.enable_model_cpu_offload(device="cuda")
+        luz = _pintor.models["delight_model"]
+        luz.pipeline = _PasosFijos(luz.pipeline, pasos_luz)
+        _pintor.models["multiview_model"] = _VistasNitidas(_pintor.models["multiview_model"])
+        _config_pintor = {"vram_baja": vram_baja, "resolucion": resolucion_textura}
 
     _pintor.models["delight_model"].pipeline.pasos = pasos_luz
-    _pintor.models["multiview_model"].pipeline.pasos = pasos_vistas
     if _config_pintor["resolucion"] != resolucion_textura:
         from hy3dgen.texgen.differentiable_renderer.mesh_render import MeshRender
 
@@ -114,10 +187,30 @@ def preparar_malla(malla, max_caras: int | None = None):
 
 
 def texturizar(malla, imagen, max_caras: int = 40000, resolucion_textura: int = 2048,
-               pasos_vistas: int = 15, pasos_luz: int = 25, vram_baja: bool | None = None):
-    """Devuelve la malla con textura de color. `imagen` debe venir sin fondo (RGBA)."""
-    pintor = cargar_pintor(resolucion_textura, pasos_vistas, pasos_luz, vram_baja)
+               pasos_luz: int = 25, vram_baja: bool | None = None, nitida: bool = True):
+    """Devuelve la malla con textura de color. `imagen` debe venir sin fondo (RGBA).
+    Con `nitida`, las vistas se amplían con IA antes de proyectarlas."""
+    pintor = cargar_pintor(resolucion_textura, pasos_luz, vram_baja)
+    pintor.models["multiview_model"].activo = nitida
     malla = preparar_malla(malla, max_caras)
-    resultado = pintor(malla, image=imagen)
+    try:
+        resultado = pintor(malla.copy(), image=imagen)
+    except torch.OutOfMemoryError:
+        # Último recurso: subir a la GPU capa por capa (más lento, cabe en ~4 GB).
+        print("Sin memoria en la GPU; se reintenta moviendo los modelos capa por capa (más lento).")
+        torch.cuda.empty_cache()
+        for nombre in ("delight_model", "multiview_model"):
+            pintor.models[nombre].pipeline.enable_sequential_cpu_offload(device="cuda")
+        resultado = pintor(malla.copy(), image=imagen)
     torch.cuda.empty_cache()
     return resultado
+
+
+def liberar():
+    """Descarga los modelos de pintura de la memoria (se recargan al volver a pintar)."""
+    global _pintor, _config_pintor
+    _pintor, _config_pintor = None, None
+    import gc
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
