@@ -290,6 +290,11 @@ def ruta_color(salida: str, extension: str) -> str:
     return os.path.splitext(salida)[0] + "_impresion_color" + extension
 
 
+# Avisos de la última llamada a generar() (trozos reconectados, acabado con menos
+# detalle...), para mostrarlos en la app; también se imprimen.
+ultimos_avisos: list[str] = []
+
+
 def generar(imagen: Image.Image, salida: str, pasos: int = 5, resolucion: int = 380,
             semilla: int = 0, dispositivo: str = "auto", textura: bool = True,
             fondo: str = "auto", ajustar: bool = True, intentos: int = 6,
@@ -329,7 +334,9 @@ def generar(imagen: Image.Image, salida: str, pasos: int = 5, resolucion: int = 
     # sueltos se quitan; antes del limpiador de Hunyuan, que borraría las primeras.
     import limpieza
     avisos_trozos = []
+    ultimos_avisos.clear()
     malla = limpieza.reparar(malla, avisos_trozos)
+    ultimos_avisos.extend(avisos_trozos)
     for aviso in avisos_trozos:
         print(aviso)
     from textura import preparar_malla
@@ -342,6 +349,7 @@ def generar(imagen: Image.Image, salida: str, pasos: int = 5, resolucion: int = 
         avisos = []
         impresion = acabados.aplicar(malla, acabado, altura_mm, escala_acabado,
                                      profundidad_acabado, avisos)
+        ultimos_avisos.extend(avisos)
         for aviso in avisos:
             print(aviso)
         impresion.export(ruta_impresion(salida))

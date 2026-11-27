@@ -14,7 +14,8 @@ Incluye:
 - `preparar_imagen.py`: analiza la imagen y quita el fondo antes de generar.
 - `acabados.py`: relieves de superficie para impresión 3D (tejido, moleteado...).
 - `multicolor.py`: 3MF pintado por filamentos para impresoras multicolor.
-- `dividir.py`: divide un modelo ya generado en partes (personaje o cortes planos).
+- `dividir.py`: divide un modelo ya generado en partes (personaje, automático, cortes planos o para pintar).
+- `pintura.py`: despiece para lijar y pintar (cortes escondidos, pasadores y orientación por pieza).
 - `personaje.py`: detecta cuello, hombros y entrepierna y separa cabeza, torso, brazos y piernas.
 - `formas.py`: división automática de cualquier forma (patas, cola, cuello...).
 - `segmentar.py`: cortes planos y uniones (espigas, pasadores, imanes).
@@ -82,8 +83,12 @@ Opciones útiles:
 
 Con `--acabado` (o la sección "Impresión 3D" de la app) se genera además
 `<salida>_impresion.stl`: en milímetros, con Z hacia arriba, apoyado en la cama y
-cerrado (estanco), listo para el laminador. El acabado es **relieve real** en la
-geometría, no color:
+cerrado (estanco), listo para el laminador. La pieza queda **de pie con la base
+plana**: si el modelo trae la base inclinada (los modelos de IA la inclinan según la
+cámara, hasta 25°), se endereza y se recortan 0.6 mm de abajo para que apoye entera
+(en una figura de prueba, de 41 a 1511 mm² de apoyo). De pie es la orientación con
+menos escalones de capa en la cara. El acabado es **relieve real** en la
+geometría, no color (la cara de apoyo queda sin relieve):
 
 | Acabado | Aspecto | Patrón / profundidad por defecto |
 |---|---|---|
@@ -104,6 +109,11 @@ Ajusta con `--escala-acabado` y `--profundidad-acabado` (mm). Para que el reliev
 se note, el patrón debe ser varias veces mayor que el diámetro de la boquilla
 (con 0.4 mm, patrones de 2 mm o más) y la profundidad de al menos 0.3 mm.
 
+La malla con relieve tiene como mucho 2 millones de caras (STL de ~100 MB). En
+figuras grandes con patrones finos los triángulos se agrandan para no pasarse, y
+la app avisa; si quedan menos de 4 triángulos por repetición del patrón, el aviso
+dice a qué escala subirlo (p. ej. anillos a 150 mm: 2.4 mm o más).
+
 ### Impresoras multicolor
 
 Con textura y `--colores N` (o el control "Colores de filamento" de la app) se
@@ -112,6 +122,8 @@ como máximo (los casi iguales se unen) y cada triángulo queda pintado con su
 filamento, en el formato de pintura de Bambu Studio / OrcaSlicer (`paint_color`)
 y de PrusaSlicer (`mmu_segmentation`). Al abrirlo, asigna a cada filamento el
 color que indica el programa al terminar (el filamento 1 es el más abundante).
+Las manchas de color de menos de 3 mm² se unen al color vecino (menos cambios de
+filamento y superficies más limpias; ojos y lentes se conservan).
 
 ```bash
 python generar3d.py gato.jpg -o gato.glb --acabado tejido --colores 4
@@ -147,6 +159,18 @@ corte fino respecto al cuerpo, para no cortar barrigas, mantas o mechones.
 
 Uniones para personaje y automático: `espiga`, `bola`, `imanes` o `ninguna`.
 
+**Para lijar y pintar** (`--plantilla pintura`, `pintura.py`): despiece como el de
+los kits de figuras. Corta solo donde la línea de pegado queda escondida: en un
+borde de color (la tapa la pintura) o en un pliegue hundido (cuello, bajo un ala,
+donde el pie toca la base). Los cortes son locales: separar el gorro no corta un
+mechón que pase por el mismo plano. Cada corte lleva agujeros en las dos piezas y
+un pasador suelto de 3 x 4 mm (`--diametro`, `--holgura`); si no cabe, se prueba
+uno de 3 x 3, luego 2.5 x 3 y 2 x 3 (en el ZIP, un STL por tamaño). Después cada pieza se
+gira para imprimirla: apoyada en una cara de corte cuando se puede y con lo menos
+posible de escalones y soporte en el frente y la cabeza. Con el `.glb` con color
+corta también por los colores; sin él, solo por pliegues. Tarda unos 14 min con
+una figura de 100 mm (pruebas 4 y 5 de `pruebas/LEEME.md`).
+
 Al dividir un `<modelo>_impresion.stl` de esta app se conserva el acabado y, con
 `--colores`, se recupera el color de su `.glb`.
 
@@ -160,6 +184,10 @@ python dividir.py figura_impresion.stl --cortes "z=60" --union imanes
 
 ```bash
 python dividir.py caballo.glb --plantilla auto --union espiga --altura-mm 150
+```
+
+```bash
+python dividir.py figura.glb --plantilla pintura --altura-mm 100
 ```
 
 Salen `<modelo>_partes.zip` (un STL por pieza con su nombre), `<modelo>_partes.3mf`

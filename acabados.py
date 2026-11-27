@@ -142,11 +142,60 @@ ACABADOS = {
 
 # --- Proceso --------------------------------------------------------------------
 
-def a_impresion(malla: trimesh.Trimesh, altura_mm: float) -> trimesh.Trimesh:
+INCLINACION_MAX_BASE = 25   # grados: se endereza una base inclinada hasta este ángulo
+RECORTE_BASE_MM = 0.6       # se corta esto de abajo para que la base apoye plana
+
+
+def giro_base_plana(vertices: np.ndarray, inclinacion_max: float = INCLINACION_MAX_BASE) -> np.ndarray:
+    """Matriz 4x4 que deja horizontal la cara plana más grande de abajo del casco
+    convexo (la base de la figura). Los modelos de IA suelen dejar la base
+    inclinada según la cámara de la imagen; así la figura queda derecha y la base
+    apoya entera. Si no hay cara de abajo con menos de `inclinacion_max` grados,
+    no gira."""
+    casco = trimesh.convex.convex_hull(vertices)
+    n, a = casco.face_normals, casco.area_faces
+    abajo = n[:, 2] < -np.cos(np.radians(inclinacion_max))
+    if not abajo.any():
+        return np.eye(4)
+    i = int(np.argmax(np.where(abajo, a, 0)))
+    grupo = abajo & (n @ n[i] > np.cos(np.radians(5)))
+    d = (n[grupo] * a[grupo, None]).sum(0)
+    d /= np.linalg.norm(d)
+    eje = np.cross(d, [0.0, 0.0, -1.0])
+    if np.linalg.norm(eje) < 1e-9:
+        return np.eye(4)
+    return trimesh.transformations.rotation_matrix(np.arccos(np.clip(-d[2], -1, 1)),
+                                                   eje / np.linalg.norm(eje))
+
+
+def recortar_base(malla: trimesh.Trimesh, mm: float = RECORTE_BASE_MM):
+    """Corta `mm` de abajo (malla apoyada en z = 0) y la vuelve a apoyar: la base
+    queda plana. Devuelve (malla, recorte hecho en mm); si la malla no es cerrada
+    no se corta (recorte 0)."""
+    from segmentar import _a_manifold
+    try:
+        cortada = _a_manifold(malla).trim_by_plane((0.0, 0.0, 1.0), mm)
+    except RuntimeError:
+        return malla, 0.0
+    if cortada.is_empty():
+        return malla, 0.0
+    # Sin simplificar: cada triángulo lleva luego su propio color de filamento.
+    m = cortada.to_mesh()
+    malla = trimesh.Trimesh(np.asarray(m.vert_properties)[:, :3], np.asarray(m.tri_verts), process=False)
+    malla.apply_translation([0, 0, -mm])
+    return malla, mm
+
+
+def a_impresion(malla: trimesh.Trimesh, altura_mm: float, base_plana: bool = True) -> trimesh.Trimesh:
     """Escala a `altura_mm`, pone Z hacia arriba (el modelo viene con Y arriba)
-    y lo apoya en la cama. La matriz usada queda en metadata["transformacion"]."""
+    y lo apoya en la cama. Con `base_plana`, además endereza la base y recorta
+    RECORTE_BASE_MM de abajo para que apoye entera (la pieza queda así de pie,
+    que es lo que da menos escalones de capa en la cara y el frente).
+    La matriz usada queda en metadata["transformacion"]."""
     malla = trimesh.Trimesh(malla.vertices.copy(), malla.faces.copy(), process=True)
     giro = trimesh.transformations.rotation_matrix(np.pi / 2, [1, 0, 0])
+    if base_plana:
+        giro = giro_base_plana(trimesh.transform_points(malla.vertices, giro)) @ giro
     v = trimesh.transform_points(malla.vertices, giro)
     escala = altura_mm / np.ptp(v[:, 2])
     v = v * escala
@@ -154,16 +203,19 @@ def a_impresion(malla: trimesh.Trimesh, altura_mm: float) -> trimesh.Trimesh:
     traslacion = trimesh.transformations.translation_matrix([-centro[0], -centro[1], -v[:, 2].min()])
     transformacion = traslacion @ np.diag([escala, escala, escala, 1.0]) @ giro
     malla.apply_transform(transformacion)
+    if base_plana:
+        malla, recorte = recortar_base(malla)
+        transformacion = trimesh.transformations.translation_matrix([0, 0, -recorte]) @ transformacion
     malla.metadata["transformacion"] = transformacion
     return malla
 
 
 def aplicar(malla: trimesh.Trimesh, acabado: str, altura_mm: float = 60,
             escala_mm: float | None = None, profundidad_mm: float | None = None,
-            avisos: list | None = None) -> trimesh.Trimesh:
+            avisos: list | None = None, base_plana: bool = True) -> trimesh.Trimesh:
     """Devuelve la malla lista para imprimir (mm, Z arriba) con el acabado.
     En metadata quedan "transformacion" y "vertices_base" (antes del relieve)."""
-    malla = a_impresion(malla, altura_mm)
+    malla = a_impresion(malla, altura_mm, base_plana)
     transformacion = malla.metadata["transformacion"]
     if acabado in (None, "", "ninguno"):
         malla.metadata["vertices_base"] = malla.vertices.copy()
@@ -172,23 +224,36 @@ def aplicar(malla: trimesh.Trimesh, acabado: str, altura_mm: float = 60,
     escala = escala_mm or escala_def
     profundidad = profundidad_mm or prof_def
 
-    # Triángulos de ~1/9 del patrón; si saldrían demasiados, se agrandan.
-    borde = escala / 9
+    # Triángulos de ~1/9 del patrón; si salen demasiados, se agrandan. La estimación
+    # por área es solo el primer intento: al partir aristas por la mitad quedan
+    # entre 1/2 y 1 vez `borde` y salen hasta ~6 veces más caras. Se cuenta y se
+    # repite con triángulos más grandes hasta quedar por debajo de MAX_CARAS.
+    pedido = borde = escala / 9
     caras_estimadas = malla.area / (0.43 * borde ** 2)
     if caras_estimadas > MAX_CARAS:
         borde *= np.sqrt(caras_estimadas / MAX_CARAS)
-        if avisos is not None:
-            avisos.append(f"Acabado: patrón pequeño para este tamaño; se usa menos detalle "
-                          f"(triángulos de {borde:.2f} mm). Sube la escala del patrón.")
-    v, f = trimesh.remesh.subdivide_to_size(malla.vertices, malla.faces, max_edge=borde,
-                                            max_iter=12)
+    for _ in range(6):
+        v, f = trimesh.remesh.subdivide_to_size(malla.vertices, malla.faces, max_edge=borde,
+                                                max_iter=12)
+        if len(f) <= MAX_CARAS or len(f) <= len(malla.faces):
+            break
+        borde *= 1.05 * np.sqrt(len(f) / MAX_CARAS)
+    if borde > pedido and avisos is not None:
+        if borde > escala / 4:     # menos de 4 triángulos por repetición: el patrón se pierde
+            avisos.append(f"Acabado: con este tamaño el patrón de {escala:g} mm casi no se verá (el "
+                          f"límite de {MAX_CARAS // 1_000_000} millones de caras obliga a triángulos de "
+                          f"{borde:.2f} mm). Sube la escala del patrón a {4 * borde:.1f} mm o más.")
+        else:
+            avisos.append(f"Acabado: patrón pequeño para este tamaño; se usa menos detalle (triángulos "
+                          f"de {borde:.2f} mm en vez de {pedido:.2f}). Sube la escala del patrón.")
     malla = trimesh.Trimesh(v, f, process=True)
     base = malla.vertices.copy()
     normales = malla.vertex_normals
     altura = funcion(malla.vertices, normales, escala)
-    malla.vertices = malla.vertices + normales * (altura * profundidad)[:, None]
-    # Tras desplazar, se vuelve a apoyar en la cama.
-    malla.apply_translation([0, 0, -malla.bounds[0][2]])
+    altura[base[:, 2] < 1e-3] = 0          # la cara de apoyo queda plana, sin relieve
+    v = malla.vertices + normales * (altura * profundidad)[:, None]
+    v[:, 2] = np.maximum(v[:, 2], 0.0)     # nada por debajo de la cama
+    malla.vertices = v
     # Para pasar el color: posiciones antes del relieve y transformación del modelo.
     malla.metadata["transformacion"] = transformacion
     malla.metadata["vertices_base"] = base

@@ -15,6 +15,7 @@ import mecanismos
 import personaje
 import segmentar
 from dividir import cargar, dividir_modelo
+import generar3d
 from generar3d import generar, ruta_color, ruta_impresion
 from preparar_imagen import preparar
 
@@ -50,6 +51,8 @@ def convertir(imagen, fondo, ajustar, pasos, resolucion, semilla, con_textura, r
             descargas.append(ruta_color(salida, ".3mf"))
             vista = ruta_color(salida, ".glb")
     liberar_si_falta_ram()
+    if generar3d.ultimos_avisos:
+        estado += "\n" + "\n".join(f"- Aviso: {a}" for a in generar3d.ultimos_avisos)
     # El .glb con color sirve después en la pestaña "Dividir modelo".
     yield (preparada, salida, salida, vista, descargas, salida,
            estado + f"\n\n**Listo en {time.time() - inicio:.0f} s.** Para imprimirlo por piezas, "
@@ -57,7 +60,7 @@ def convertir(imagen, fondo, ajustar, pasos, resolucion, semilla, con_textura, r
 
 
 def dividir_app(archivo, ultimo, tipo, plantilla, max_partes, cortes, union_p, union_c, diametro,
-                holgura, altura, colores):
+                holgura, altura, colores, progreso=gr.Progress()):
     ruta = archivo
     if not ruta and ultimo:
         # La pieza de impresión (con acabado, en mm) y, por su nombre, el .glb con color.
@@ -69,12 +72,15 @@ def dividir_app(archivo, ultimo, tipo, plantilla, max_partes, cortes, union_p, u
         modo, union = PLANTILLAS_UI[plantilla], UNIONES_PERSONAJE[union_p]
     elif tipo == TIPOS[1]:
         modo, union = "auto", UNIONES_PERSONAJE[union_p]
+    elif tipo == TIPOS[3]:
+        modo, union = "pintura", "pasadores"
     else:
         modo, union = None, segmentar_uniones[union_c]
     try:
         rutas, informe = dividir_modelo(
             ruta, modo, cortes, union, float(diametro or 0), float(holgura), float(altura) or None,
-            int(colores), salida_base=base, max_partes=int(max_partes))
+            int(colores), salida_base=base, max_partes=int(max_partes),
+            avisar=lambda f, texto: progreso(f, desc=texto))
     except (RuntimeError, ValueError) as e:
         raise gr.Error(str(e))
     texto = "\n".join(f"- {linea}" for linea in informe.splitlines())
@@ -132,10 +138,10 @@ def construir_app(archivo, ultimo, texto, modo, holgura, diametro, altura, color
 
 
 def visibilidad_division(tipo):
-    personaje_, auto = tipo == TIPOS[0], tipo == TIPOS[1]
-    return (gr.update(visible=personaje_), gr.update(visible=personaje_), gr.update(visible=auto),
+    personaje_, auto, pintar = tipo == TIPOS[0], tipo == TIPOS[1], tipo == TIPOS[3]
+    return (gr.update(visible=personaje_), gr.update(visible=personaje_), gr.update(visible=auto or pintar),
             gr.update(visible=tipo == TIPOS[2]), gr.update(visible=personaje_ or auto),
-            gr.update(visible=tipo == TIPOS[2]))
+            gr.update(visible=tipo == TIPOS[2]), gr.update(visible=pintar))
 
 
 def liberar_si_falta_ram(minimo_gb=4.0):
@@ -163,7 +169,8 @@ def valores_acabado(nombre):
     return gr.update(value=escala, interactive=True), gr.update(value=profundidad, interactive=True)
 
 
-TIPOS = ["Personaje (cabeza, torso, brazos, piernas)", "Automático (cualquier forma)", "Cortes planos"]
+TIPOS = ["Personaje (cabeza, torso, brazos, piernas)", "Automático (cualquier forma)", "Cortes planos",
+         "Para lijar y pintar (cortes escondidos)"]
 PLANTILLAS_UI = {v[0]: k for k, v in personaje.PLANTILLAS.items()}
 UNIONES_PERSONAJE = {v: k for k, v in personaje.UNIONES.items()}
 segmentar_uniones = {v: k for k, v in segmentar.UNIONES.items()}
@@ -245,8 +252,13 @@ with gr.Blocks(title="Imagen a 3D") as demo:
                                  info="El personaje debe estar de pie, de frente y con los brazos "
                                       "separados del cuerpo para poder separarlos.")
             max_partes = gr.Slider(2, 12, value=8, step=1, label="Máximo de partes", visible=False,
-                                   info="Separa lo que sobresale del cuerpo: patas, cola, cabeza, "
-                                        "alas, asas...")
+                                   info="Automático: separa lo que sobresale (patas, cola, cabeza, "
+                                        "alas...). Para pintar: corta como mucho en tantas piezas.")
+            ayuda_pintura = gr.Markdown(
+                "Corta donde la línea de pegado queda escondida: en un borde de color (la tapa la "
+                "pintura) o en un pliegue hundido (cuello, bajo un ala). Cada corte lleva agujeros y "
+                "pasadores sueltos, y cada pieza sale girada para imprimirla. Usa el **.glb con color** "
+                "para que corte también por los colores. Tarda unos minutos.", visible=False)
             cortes = gr.Textbox(value="z=40", label="Cortes (mm): eje=posición separados por comas",
                                 visible=False)
             union_p = gr.Radio(list(UNIONES_PERSONAJE), value=list(UNIONES_PERSONAJE)[0],
@@ -267,7 +279,7 @@ with gr.Blocks(title="Imagen a 3D") as demo:
             archivos = gr.File(label="Descargar partes (.zip con un STL por parte, .3mf colocado)",
                                file_count="multiple")
     tipo.change(visibilidad_division, tipo,
-                [imagen_plantillas, plantilla, max_partes, cortes, union_p, union_c])
+                [imagen_plantillas, plantilla, max_partes, cortes, union_p, union_c, ayuda_pintura])
     boton_dividir.click(dividir_app, [modelo, ultimo, tipo, plantilla, max_partes, cortes, union_p,
                                       union_c, diametro, holgura, altura, colores_d],
                         [informe, vista, archivos])

@@ -4,6 +4,7 @@ Uso:
     python dividir.py modelo.glb --plantilla 6 --union bola --altura-mm 120
     python dividir.py modelo_impresion.stl --plantilla 4 --union espiga
     python dividir.py modelo.glb --cortes "z=40" --union imanes
+    python dividir.py modelo.glb --plantilla pintura --altura-mm 100
 
 Entradas: .glb/.gltf/.obj (salida de generar3d o app; se escala a --altura-mm) o
 .stl/.3mf/.ply (malla de impresión, ya en mm con Z arriba; se respeta su tamaño
@@ -12,6 +13,10 @@ sale pintado por filamentos.
 
 Salidas junto al modelo: <nombre>_partes.zip (un STL por parte), <nombre>_partes.3mf
 (todas colocadas en la cama) y <nombre>_partes.glb (vista separada).
+
+--plantilla pintura: despiece para lijar y pintar (pintura.py). Corta donde la
+unión queda escondida (bordes de color y pliegues hundidos), pone agujeros y
+pasadores sueltos y orienta cada pieza para imprimirla. Tarda varios minutos.
 """
 import argparse
 import os
@@ -75,12 +80,24 @@ def colores_por_parte(partes, impresion, textura, n_colores):
 def dividir_modelo(ruta: str, plantilla: str | None = "6", cortes_manual: str = "",
                    union: str = "espiga", diametro: float = 0.0, holgura: float = 0.2,
                    altura_mm: float | None = None, colores: int = 1,
-                   iman=(6.0, 3.0), salida_base: str | None = None, max_partes: int = 8):
-    """Divide el modelo. Devuelve (rutas de salida, texto de informe)."""
+                   iman=(6.0, 3.0), salida_base: str | None = None, max_partes: int = 8,
+                   avisar=None):
+    """Divide el modelo. Devuelve (rutas de salida, texto de informe).
+    `avisar(fracción, texto)`: progreso (solo en el modo "pintura", que tarda)."""
     t = time.time()
     impresion, textura = cargar(ruta, altura_mm)
     informe = [f"Modelo: {impresion.extents.round(1)} mm, {len(impresion.faces)} caras."]
-    if plantilla == "auto":
+    montadas = None   # piezas en su sitio (para los colores y la vista) si se giran
+    if plantilla == "pintura":
+        import pintura
+        res, lineas, datos = pintura.dividir_para_pintar(
+            impresion, pintura.etiquetas_color(impresion, textura), max_partes, diametro or 3.0, holgura,
+            avisar)
+        informe += lineas
+        montadas = datos["partes"]
+        informe.append("Cada pieza va girada para imprimirla (apoyada en una cara de corte cuando se "
+                       "puede); los pasadores se imprimen de pie.")
+    elif plantilla == "auto":
         if union not in personaje.UNIONES:
             union = "espiga"
         d = formas.dividir(impresion, max_partes, personaje.OpcionesUnion(union, diametro, holgura,
@@ -112,14 +129,14 @@ def dividir_modelo(ruta: str, plantilla: str | None = "6", cortes_manual: str = 
         if textura is None or impresion.metadata.get("transformacion") is None:
             informe.append("Colores: el modelo no tiene textura (usa el .glb con color); se exporta sin pintar.")
         else:
-            etiquetas, paleta = colores_por_parte(res.partes, impresion, textura, colores)
+            etiquetas, paleta = colores_por_parte(montadas or res.partes, impresion, textura, colores)
             informe.append("Filamentos: " + ", ".join(f"{i + 1}: #{r:02X}{g:02X}{b:02X}"
                                                       for i, (r, g, b) in enumerate(paleta)))
     base = salida_base or os.path.splitext(ruta)[0]
     rutas = {"zip": base + "_partes.zip", "3mf": base + "_partes.3mf", "vista": base + "_partes.glb"}
     segmentar.exportar_zip(rutas["zip"], res)
     segmentar.exportar_3mf(rutas["3mf"], res, etiquetas, paleta)
-    segmentar.vista_explosionada(res.partes, rutas["vista"])
+    segmentar.vista_explosionada(montadas or res.partes, rutas["vista"])
     informe.append(f"{len(res.partes)} partes: " + ", ".join(
         f"{n} ({'x'.join(f'{d:.0f}' for d in m.extents)} mm)"
         for n, m in zip(res.nombres or [f"parte {i + 1}" for i in range(len(res.partes))], res.partes))
@@ -130,10 +147,11 @@ def dividir_modelo(ruta: str, plantilla: str | None = "6", cortes_manual: str = 
 def main():
     p = argparse.ArgumentParser(description="Divide un modelo 3D en partes con uniones")
     p.add_argument("modelo", help=".glb/.obj (de la app) o .stl/.3mf (malla de impresión)")
-    p.add_argument("--plantilla", default="6", choices=list(personaje.PLANTILLAS) + ["auto"],
+    p.add_argument("--plantilla", default="6", choices=list(personaje.PLANTILLAS) + ["auto", "pintura"],
                    help="; ".join(f"{k}: {v[0]}" for k, v in personaje.PLANTILLAS.items())
-                   + "; auto: cualquier forma (separa lo que sobresale: patas, cola, cabeza...)")
-    p.add_argument("--max-partes", type=int, default=8, help="Máximo de partes en modo auto")
+                   + "; auto: cualquier forma (separa lo que sobresale: patas, cola, cabeza...)"
+                   + "; pintura: para lijar y pintar (cortes escondidos, piezas orientadas)")
+    p.add_argument("--max-partes", type=int, default=8, help="Máximo de partes (modos auto y pintura)")
     p.add_argument("--cortes", default="", help='En vez de plantilla, cortes planos: "z=40, x=0" (mm)')
     p.add_argument("--union", default="espiga",
                    choices=sorted(set(personaje.UNIONES) | set(segmentar.UNIONES)),

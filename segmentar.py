@@ -285,9 +285,19 @@ def exportar_zip(ruta: str, res: Resultado):
             nombre = res.nombres[i - 1] if len(res.nombres) >= i else f"parte {i}"
             archivo = re.sub(r"[^a-z0-9]+", "_", nombre.lower()).strip("_")
             z.writestr(f"{i:02d}_{archivo}.stl", p.export(file_type="stl"))
-        if res.pasadores:
-            z.writestr(f"pasadores_x{len(res.pasadores)}.stl",
-                       trimesh.util.concatenate(colocar_en_cama(res.pasadores, 4.0)).export(file_type="stl"))
+        # Un STL por tamaño de pasador (p. ej. pasadores_3x4mm_x14.stl).
+        grupos = {}
+        for p in res.pasadores:
+            grupos.setdefault(_medida_pasador(p), []).append(p)
+        for medida, grupo in grupos.items():
+            z.writestr(f"pasadores_{medida}mm_x{len(grupo)}.stl",
+                       trimesh.util.concatenate(colocar_en_cama(grupo, 4.0)).export(file_type="stl"))
+
+
+def _medida_pasador(p) -> str:
+    """'3x4' (diámetro x largo en mm, sin decimales si no hacen falta)."""
+    f = lambda x: f"{x:.1f}".rstrip("0").rstrip(".")
+    return f"{f(p.extents[0])}x{f(p.extents[2])}"
 
 
 def colores_de_partes(res: Resultado, original: trimesh.Trimesh, etiquetas: np.ndarray) -> list:
@@ -308,7 +318,7 @@ def exportar_3mf(ruta: str, res: Resultado, etiquetas_partes: list | None = None
     objetos = colocar_en_cama(res.partes + res.pasadores)
     nombres = [res.nombres[i - 1] if len(res.nombres) >= i else f"Parte {i}"
                for i in range(1, len(res.partes) + 1)] + \
-              [f"Pasador {i}" for i in range(1, len(res.pasadores) + 1)]
+              [f"Pasador {i} ({_medida_pasador(p)} mm)" for i, p in enumerate(res.pasadores, 1)]
     etiquetas = list(etiquetas_partes or []) + [None] * (len(objetos) - len(etiquetas_partes or []))
     recursos, items = [], []
     if paleta is not None:
